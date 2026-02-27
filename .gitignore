@@ -1,0 +1,128 @@
+# -------------------------------
+# Python / Virtual Environments
+# -------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyi
+
+.venv/
+venv/
+env/
+ENV/
+
+# -------------------------------
+# Packaging / Build artifacts
+# -------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# -------------------------------
+# Test / Coverage
+# -------------------------------
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# -------------------------------
+# Logs & Runtime Files
+# -------------------------------
+*.log
+logs/
+*.pid
+
+# -------------------------------
+# OS / Editor noise
+# -------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -------------------------------
+# Radxa / Indexer specific
+# -------------------------------
+
+# Thumbnail cache (generated, reproducible)
+thumbnails/
+mnt/storage/thumbnails/
+**/thumbnails/
+
+# Search / vector indexes
+index/
+indexes/
+search_index/
+*.index
+*.faiss
+*.db
+
+# Embedding caches
+embeddings/
+vector_cache/
+
+# Temporary processing files
+tmp/
+temp/
+.cache/
+
+# -------------------------------
+# Media files (do NOT commit user data)
+# -------------------------------
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.mp3
+*.wav
+*.flac
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+*.pdf
+
+# -------------------------------
+# Secrets & Config
+# -------------------------------
+.env
+.env.*
+*.secret
+*.key
+*.pem
+credentials.json
+client_secret*.json
+
+# -------------------------------
+# Radxa device state / runtime
+# -------------------------------
+radxa_state.json
+device_cache/
+sync_state.json
+
+# -------------------------------
+# Docker (if used)
+# -------------------------------
+*.tar
+docker-data/
+
+thumbnails/
+mnt/storage/
+*.mp4
+*.mkv
+*.avi
+*.jpg
+*.png
+*.pdf
+index/
+indexes/
+embeddings/
+storage/
