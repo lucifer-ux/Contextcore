@@ -3,6 +3,8 @@ import os, time, asyncio, threading, sqlite3, traceback
 import subprocess, gc, hashlib, base64
 import socket
 import time
+import shutil
+import builtins
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +20,15 @@ from index_controller.ignore import should_ignore
 from fastapi import Request
 from rclone_service import *
 from auth_manager import start_auth, auth_sessions
+
+_orig_print = builtins.print
+
+def print(*args, **kwargs):
+    try:
+        return _orig_print(*args, **kwargs)
+    except UnicodeEncodeError:
+        safe_args = [str(a).encode("ascii", "replace").decode("ascii") for a in args]
+        return _orig_print(*safe_args, **kwargs)
 
 
 # ── Paths & tunables ─────────────────────────────────────────
@@ -63,6 +74,9 @@ NETWORK_STATE = {
     "ssid": None,
     "hotspot_active": False
 }
+NETWORK_CONTROL_SUPPORTED = (
+    os.name == "posix" and shutil.which("nmcli") is not None
+)
 
 # NOTE: No idle-unload — whichever family is loaded stays loaded
 #       until the OTHER family is explicitly requested.
@@ -900,6 +914,9 @@ def network_status():
 
 @app.post("/configure-wifi")
 def configure_wifi(data: dict):
+    if not NETWORK_CONTROL_SUPPORTED:
+        raise HTTPException(501, "WiFi configuration via nmcli is not supported on this host")
+
     ssid = data.get("ssid")
     password = data.get("password")
 
@@ -1078,6 +1095,8 @@ def is_connected():
         return False
 
 def stop_system_dnsmasq():
+    if shutil.which("systemctl") is None:
+        return
     subprocess.run(["sudo", "systemctl", "stop", "dnsmasq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def start_hotspot():
@@ -1120,6 +1139,12 @@ def start_hotspot():
 
 def network_bootstrap():
     print("checking network state on startup...")
+    if not NETWORK_CONTROL_SUPPORTED:
+        print("nmcli not available; skipping hotspot bootstrap")
+        NETWORK_STATE["connected"] = True
+        NETWORK_STATE["ssid"] = "local-dev"
+        NETWORK_STATE["hotspot_active"] = False
+        return
 
     if is_connected():
         ssid = get_current_wifi()
