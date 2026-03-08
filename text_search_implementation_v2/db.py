@@ -26,10 +26,15 @@ def init_db():
                 path TEXT UNIQUE,
                 filename TEXT,
                 category TEXT,
-                mtime REAL
+                mtime REAL,
+                content TEXT
             )
             """
         )
+        # Backward-compatible migration for old DBs that were missing content.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)").fetchall()}
+        if "content" not in cols:
+            conn.execute("ALTER TABLE files ADD COLUMN content TEXT")
         # FTS5 virtual table for content + filename
         conn.execute(
             """
@@ -55,8 +60,8 @@ def upsert_file(path: str, filename: str, category: str, mtime: float, content: 
                 return False  # unchanged
             file_id = row["id"]
             conn.execute(
-                "UPDATE files SET filename = ?, category = ?, mtime = ? WHERE id = ?",
-                (filename, category, mtime, file_id),
+                "UPDATE files SET filename = ?, category = ?, mtime = ?, content = ? WHERE id = ?",
+                (filename, category, mtime, content, file_id),
             )
             conn.execute(
                 "DELETE FROM files_fts WHERE rowid = ?",
@@ -64,8 +69,8 @@ def upsert_file(path: str, filename: str, category: str, mtime: float, content: 
             )
         else:
             cur = conn.execute(
-                "INSERT INTO files (path, filename, category, mtime) VALUES (?, ?, ?, ?)",
-                (path, filename, category, mtime)
+                "INSERT INTO files (path, filename, category, mtime, content) VALUES (?, ?, ?, ?, ?)",
+                (path, filename, category, mtime, content)
             )
             file_id = cur.lastrowid
 
@@ -96,6 +101,17 @@ def get_file_metadata_by_ids(ids):
     rows = cur.fetchall()
     conn.close()
     return {r["id"]: dict(r) for r in rows}
+
+
+def get_fts_content_by_ids(ids):
+    if not ids:
+        return {}
+    conn = get_conn()
+    placeholders = ",".join("?" for _ in ids)
+    cur = conn.execute(f"SELECT id, content FROM files WHERE id IN ({placeholders})", ids)
+    rows = cur.fetchall()
+    conn.close()
+    return {int(r["id"]): (r["content"] or "") for r in rows}
 
 def get_file_mtime(path: str):
     conn = sqlite3.connect(DB_PATH)

@@ -307,6 +307,16 @@ def embed_text_with_clip(text: str):
               processor(text=[text], return_tensors="pt", padding=True).items()}
     with torch.no_grad():
         feats = model.get_text_features(**inputs)
+        # Some transformer/CLIP variants may return model output objects.
+        if not isinstance(feats, torch.Tensor):
+            if hasattr(feats, "text_embeds") and feats.text_embeds is not None:
+                feats = feats.text_embeds
+            elif hasattr(feats, "pooler_output") and feats.pooler_output is not None:
+                feats = feats.pooler_output
+            elif hasattr(feats, "last_hidden_state") and feats.last_hidden_state is not None:
+                feats = feats.last_hidden_state[:, 0, :]
+            else:
+                raise RuntimeError("Unsupported CLIP text feature output type")
     return (feats / feats.norm(dim=-1, keepdim=True)).squeeze(0).cpu().numpy().astype("float32")
 
 
@@ -318,6 +328,15 @@ def embed_image_file(image_path: Path):
     inputs = {k: v.to("cpu") for k, v in processor(images=img, return_tensors="pt").items()}
     with torch.no_grad():
         feats = model.get_image_features(**inputs)
+        if not isinstance(feats, torch.Tensor):
+            if hasattr(feats, "image_embeds") and feats.image_embeds is not None:
+                feats = feats.image_embeds
+            elif hasattr(feats, "pooler_output") and feats.pooler_output is not None:
+                feats = feats.pooler_output
+            elif hasattr(feats, "last_hidden_state") and feats.last_hidden_state is not None:
+                feats = feats.last_hidden_state[:, 0, :]
+            else:
+                raise RuntimeError("Unsupported CLIP image feature output type")
     return (feats / feats.norm(dim=-1, keepdim=True)).squeeze(0).cpu().numpy().astype("float32")
 
 
@@ -509,9 +528,24 @@ def scan_audio_index_wrapper():
 
 
 # ── Search helpers ────────────────────────────────────────────
-def run_text_search(query: str, top_k: int = 20):
+def run_text_search(
+    query: str,
+    top_k: int = 20,
+    include_metadata: bool = False,
+    chunk_chars: int = 900,
+    chunk_overlap: int = 120,
+    exclude_sources: set[str] | None = None,
+):
     try:
-        return get_text_engine().search(query=query, categories=None, top_k=top_k)
+        return get_text_engine().search(
+            query=query,
+            categories=None,
+            top_k=top_k,
+            include_metadata=include_metadata,
+            chunk_chars=chunk_chars,
+            chunk_overlap=chunk_overlap,
+            exclude_sources=exclude_sources,
+        )
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
@@ -575,6 +609,18 @@ async def startup():
     # No watchdog started — models persist until displaced by opposite family
     print("🚀 unimain started (no idle-unload — models persist until switched)")
     network_bootstrap()
+    auto_prewarm = os.getenv("CONTEXTCORE_PREWARM_ON_STARTUP", "1").strip().lower() not in {"0", "false", "no"}
+    if auto_prewarm:
+        print("🔥 startup prewarm enabled (text + CLIP)")
+        try:
+            get_text_engine()
+        except Exception as e:
+            print("⚠️ text prewarm failed:", e)
+        try:
+            lazy_load_clip()
+            print("✅ CLIP prewarmed")
+        except Exception as e:
+            print("⚠️ CLIP prewarm failed:", e)
 
 
 @app.on_event("shutdown")
@@ -661,6 +707,11 @@ async def run_llm(
 async def unified_search(
     query: str = Query(..., min_length=1),
     top_k: int = Query(20, ge=1, le=200),
+    modality: str = Query("all"),
+    text_include_metadata: bool = Query(False),
+    text_chunk_chars: int = Query(900, ge=200, le=4000),
+    text_chunk_overlap: int = Query(120, ge=0, le=1000),
+    exclude_sources: str | None = Query(None),
 ):
     """
     Unified text + image + video search.
@@ -673,31 +724,53 @@ async def unified_search(
     if not q:
         raise HTTPException(400, "empty query")
 
+    mode = modality.strip().lower()
+    if mode not in {"all", "text", "image", "video", "audio"}:
+        raise HTTPException(400, "invalid modality; expected all,text,image,video,audio")
+
+    excluded: set[str] = set()
+    if exclude_sources:
+        excluded = {p.strip() for p in exclude_sources.split(",") if p.strip()}
+
     async with rm.embed_context():
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=SEARCH_THREADPOOL) as ex:
             text_res = image_res = video_res = None
-            try:
-                text_res  = await asyncio.wait_for(
-                    loop.run_in_executor(ex, run_text_search, q, top_k), timeout=8)
-            except Exception as e:
-                text_res  = {"error": str(e)}
-            try:
-                image_res = await asyncio.wait_for(
-                    loop.run_in_executor(ex, run_image_search, q, min(50, top_k)), timeout=10)
-            except Exception as e:
-                image_res = {"error": str(e)}
-            try:
-                video_res = await asyncio.wait_for(
-                    loop.run_in_executor(ex, run_video_search, q, min(50, top_k)), timeout=12)
-            except Exception as e:
-                video_res = {"error": str(e)}
+            if mode in {"all", "text", "audio"}:
+                try:
+                    text_res  = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            ex,
+                            run_text_search,
+                            q,
+                            top_k,
+                            text_include_metadata,
+                            text_chunk_chars,
+                            text_chunk_overlap,
+                            excluded,
+                        ),
+                        timeout=8,
+                    )
+                except Exception as e:
+                    text_res  = {"error": str(e)}
+            if mode in {"all", "image"}:
+                try:
+                    image_res = await asyncio.wait_for(
+                        loop.run_in_executor(ex, run_image_search, q, min(50, top_k)), timeout=10)
+                except Exception as e:
+                    image_res = {"error": str(e)}
+            if mode in {"all", "video"}:
+                try:
+                    video_res = await asyncio.wait_for(
+                        loop.run_in_executor(ex, run_video_search, q, min(50, top_k)), timeout=12)
+                except Exception as e:
+                    video_res = {"error": str(e)}
 
-    out = {"query": q}
+    out = {"query": q, "modality": mode}
     out["text"]  = ({"count": len(text_res),  "results": text_res}
                     if isinstance(text_res, list)
                     else {"count": 0, "results": [],
-                          "error": text_res.get("error") if isinstance(text_res, dict) else str(text_res)})
+                          "error": text_res.get("error") if isinstance(text_res, dict) else None})
     out["image"] = ({"count": len(image_res["hits"]), "results": image_res["hits"]}
                     if isinstance(image_res, dict) and "hits" in image_res
                     else {"count": 0, "results": [],
@@ -707,6 +780,23 @@ async def unified_search(
                     else {"count": 0, "results": [],
                           "error": video_res.get("error") if isinstance(video_res, dict) else None})
     return out
+
+
+@app.get("/search/text/neighbors")
+def text_neighbors(
+    chunk_id: str = Query(..., min_length=8),
+    direction: str = Query("next"),
+    count: int = Query(1, ge=1, le=5),
+):
+    try:
+        result = get_text_engine().get_neighbors(
+            chunk_id=chunk_id,
+            direction=direction,
+            count=count,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 # ── /index/scan ───────────────────────────────────────────────

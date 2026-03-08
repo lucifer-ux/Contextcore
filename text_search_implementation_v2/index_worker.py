@@ -6,7 +6,22 @@ from text_search_implementation_v2.extract import extract_text
 from text_search_implementation_v2.config import BASE_DIR, TEXT_FOLDERS
 
 
-SUPPORTED_EXT = {"txt", "pdf", "doc", "docx", "csv", "xlsx"}
+SUPPORTED_EXT = {
+    "txt",
+    "md",
+    "pdf",
+    "doc",
+    "docx",
+    "ppt",
+    "pptx",
+    "csv",
+    "xlsx",
+    "xls",
+    "json",
+    "xml",
+    "rtf",
+    "ods",
+}
 
 
 def index_one_file(p: Path):

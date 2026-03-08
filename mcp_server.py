@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +25,12 @@ DEFAULT_TIMEOUT_SECONDS = 120
 BACKEND_BASE_URL = os.getenv("CONTEXTCORE_API_BASE_URL", DEFAULT_BACKEND_URL).rstrip("/")
 REQUEST_TIMEOUT = float(os.getenv("CONTEXTCORE_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
 PROJECT_ROOT = Path(__file__).resolve().parent
+RETRIEVAL_BUDGET_MAX_CALLS = int(os.getenv("CONTEXTCORE_RETRIEVAL_BUDGET", "4"))
 
 mcp = FastMCP(SERVER_NAME, json_response=True)
+_BUDGET_LOCK = threading.Lock()
+_SESSION_BUDGETS: dict[str, int] = {}
+_FEEDBACK_DB = PROJECT_ROOT / "storage" / "mcp_feedback.db"
 
 
 def _request_json(
@@ -87,6 +92,71 @@ def _safe_sql_count(db_path: Path, sql: str, params: tuple[Any, ...] = ()) -> in
         return 0
 
 
+def _init_feedback_db() -> None:
+    _FEEDBACK_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_FEEDBACK_DB))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS refine_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL DEFAULT (datetime('now')),
+            session_id TEXT,
+            original_query TEXT,
+            reason TEXT,
+            refined_query TEXT,
+            exclude_sources TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def _log_refine_feedback(
+    session_id: str,
+    original_query: str,
+    reason: str,
+    refined_query: str,
+    exclude_sources: list[str] | None,
+) -> None:
+    try:
+        _init_feedback_db()
+        conn = sqlite3.connect(str(_FEEDBACK_DB))
+        conn.execute(
+            """
+            INSERT INTO refine_feedback(session_id, original_query, reason, refined_query, exclude_sources)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (session_id, original_query, reason, refined_query, ",".join(exclude_sources or [])),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _consume_budget(session_id: str, reset: bool = False) -> dict[str, Any]:
+    sid = session_id.strip() or "default"
+    with _BUDGET_LOCK:
+        if reset or sid not in _SESSION_BUDGETS:
+            _SESSION_BUDGETS[sid] = RETRIEVAL_BUDGET_MAX_CALLS
+        if _SESSION_BUDGETS[sid] <= 0:
+            return {
+                "ok": False,
+                "error": "retrieval_budget_exhausted",
+                "session_id": sid,
+                "budget_remaining": 0,
+                "budget_max": RETRIEVAL_BUDGET_MAX_CALLS,
+            }
+        _SESSION_BUDGETS[sid] -= 1
+        return {
+            "ok": True,
+            "session_id": sid,
+            "budget_remaining": _SESSION_BUDGETS[sid],
+            "budget_max": RETRIEVAL_BUDGET_MAX_CALLS,
+        }
+
+
 def _load_source_config() -> dict[str, Any]:
     text_base = "/mnt/storage/organized_files"
     text_folders = ["docs", "spreadsheets", "code"]
@@ -119,7 +189,14 @@ def _load_source_config() -> dict[str, Any]:
 
 
 @mcp.tool()
-def search(query: str, top_k: int = 5, modality: str = "all") -> dict[str, Any]:
+def search(
+    query: str,
+    top_k: int = 5,
+    modality: str = "all",
+    session_id: str = "default",
+    reset_budget: bool = False,
+    include_metadata: bool = False,
+) -> dict[str, Any]:
     """
     Search the user's indexed content - documents, messages, images,
     audio transcripts, and videos - and return the most relevant results
@@ -159,11 +236,21 @@ def search(query: str, top_k: int = 5, modality: str = "all") -> dict[str, Any]:
             "message": "modality must be one of: all, text, image, video, audio",
         }
 
+    budget = _consume_budget(session_id=session_id, reset=reset_budget)
+    if not budget.get("ok"):
+        return budget
+
     bounded_top_k = max(1, min(int(top_k), 15))
+    upstream_top_k = max(20, bounded_top_k) if normalized_modality == "all" else bounded_top_k
     upstream = _request_json(
         "GET",
         "/search",
-        params={"query": query, "top_k": max(20, bounded_top_k)},
+        params={
+            "query": query,
+            "top_k": upstream_top_k,
+            "modality": normalized_modality,
+            "text_include_metadata": include_metadata,
+        },
         timeout=60,
     )
     if not upstream.get("ok"):
@@ -184,6 +271,10 @@ def search(query: str, top_k: int = 5, modality: str = "all") -> dict[str, Any]:
                     "filename": r.get("filename"),
                     "score": float(r.get("score", 0.0)),
                     "category": r.get("category"),
+                    "chunk": r.get("chunk"),
+                    "chunk_id": r.get("chunk_id"),
+                    "chunk_index": r.get("chunk_index"),
+                    "chunk_total": r.get("chunk_total"),
                 }
             )
         return out
@@ -236,9 +327,102 @@ def search(query: str, top_k: int = 5, modality: str = "all") -> dict[str, Any]:
         "query": query,
         "modality": normalized_modality,
         "top_k": bounded_top_k,
+        "session_id": budget.get("session_id"),
+        "budget_remaining": budget.get("budget_remaining"),
+        "budget_max": budget.get("budget_max"),
         "result_count": len(merged),
         "results": merged,
         "empty_or_low_confidence": (not merged) or all(float(r.get("score", 0.0)) < 0.1 for r in merged),
+    }
+
+
+@mcp.tool()
+def refine_search(
+    original_query: str,
+    reason: str,
+    refined_query: str,
+    exclude_sources: list[str] | None = None,
+    top_k: int = 5,
+    modality: str = "text",
+    session_id: str = "default",
+    include_metadata: bool = False,
+) -> dict[str, Any]:
+    budget = _consume_budget(session_id=session_id, reset=False)
+    if not budget.get("ok"):
+        return budget
+
+    _log_refine_feedback(
+        session_id=session_id,
+        original_query=original_query,
+        reason=reason,
+        refined_query=refined_query,
+        exclude_sources=exclude_sources,
+    )
+
+    normalized_modality = modality.strip().lower()
+    if normalized_modality not in {"all", "text", "image", "video", "audio"}:
+        return {
+            "ok": False,
+            "error": "invalid_modality",
+            "message": "modality must be one of: all, text, image, video, audio",
+        }
+
+    bounded_top_k = max(1, min(int(top_k), 15))
+    params: dict[str, Any] = {
+        "query": refined_query,
+        "top_k": max(20, bounded_top_k) if normalized_modality == "all" else bounded_top_k,
+        "modality": normalized_modality,
+        "text_include_metadata": include_metadata,
+    }
+    if exclude_sources:
+        params["exclude_sources"] = ",".join(str(s) for s in exclude_sources if str(s).strip())
+
+    upstream = _request_json("GET", "/search", params=params, timeout=60)
+    if not upstream.get("ok"):
+        return upstream
+
+    return {
+        "ok": True,
+        "original_query": original_query,
+        "reason": reason,
+        "query": refined_query,
+        "session_id": budget.get("session_id"),
+        "budget_remaining": budget.get("budget_remaining"),
+        "budget_max": budget.get("budget_max"),
+        "data": upstream["data"],
+    }
+
+
+@mcp.tool()
+def get_neighbors(
+    chunk_id: str,
+    direction: str = "next",
+    count: int = 1,
+    session_id: str = "default",
+) -> dict[str, Any]:
+    budget = _consume_budget(session_id=session_id, reset=False)
+    if not budget.get("ok"):
+        return budget
+
+    upstream = _request_json(
+        "GET",
+        "/search/text/neighbors",
+        params={
+            "chunk_id": chunk_id,
+            "direction": direction,
+            "count": max(1, min(int(count), 5)),
+        },
+        timeout=30,
+    )
+    if not upstream.get("ok"):
+        return upstream
+
+    return {
+        "ok": True,
+        "session_id": budget.get("session_id"),
+        "budget_remaining": budget.get("budget_remaining"),
+        "budget_max": budget.get("budget_max"),
+        "data": upstream["data"],
     }
 
 
