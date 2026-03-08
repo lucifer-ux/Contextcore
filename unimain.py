@@ -5,6 +5,8 @@ import socket
 import time
 import shutil
 import builtins
+import fnmatch
+import mimetypes
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -77,6 +79,20 @@ NETWORK_STATE = {
 NETWORK_CONTROL_SUPPORTED = (
     os.name == "posix" and shutil.which("nmcli") is not None
 )
+
+# File access policy:
+# - default allows arbitrary local file serving/listing for desktop/dev workflows
+# - can be restricted by setting CONTEXTCORE_ALLOW_ARBITRARY_FILE_ACCESS=0 and
+#   CONTEXTCORE_FILE_ROOTS to a ';'-separated allowlist.
+ALLOW_ARBITRARY_FILE_ACCESS = (
+    os.getenv("CONTEXTCORE_ALLOW_ARBITRARY_FILE_ACCESS", "1").strip().lower()
+    not in {"0", "false", "no"}
+)
+FILE_ROOTS = [
+    Path(p).expanduser().resolve()
+    for p in os.getenv("CONTEXTCORE_FILE_ROOTS", "").split(";")
+    if p.strip()
+]
 
 # NOTE: No idle-unload — whichever family is loaded stays loaded
 #       until the OTHER family is explicitly requested.
@@ -897,10 +913,49 @@ def get_file(path: str = Query(...)):
     p = Path(path).resolve()
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "File not found")
+    if not _is_path_allowed(p):
+        raise HTTPException(403, "Path not allowed")
     return FileResponse(
         path=p, filename=p.name, media_type=None,
         headers={"Content-Disposition": f'inline; filename="{p.name}"'},
     )
+
+
+@app.get("/files/list")
+def list_files(
+    directory: str = Query(...),
+    recursive: bool = Query(True),
+    limit: int = Query(200, ge=1, le=2000),
+    pattern: str = Query("*"),
+):
+    root = Path(directory).resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+
+    walker = root.rglob("*") if recursive else root.glob("*")
+    out = []
+    for p in walker:
+        if not p.is_file():
+            continue
+        if pattern and not fnmatch.fnmatch(p.name, pattern):
+            continue
+        if should_ignore(p):
+            continue
+        mime, _ = mimetypes.guess_type(str(p))
+        out.append(
+            {
+                "path": str(p),
+                "filename": p.name,
+                "size_bytes": p.stat().st_size,
+                "mtime": p.stat().st_mtime,
+                "mime_type": mime or "application/octet-stream",
+            }
+        )
+        if len(out) >= limit:
+            break
+    return {"directory": str(root), "count": len(out), "files": out}
 
 
 @app.post("/files/preflight")
@@ -1108,6 +1163,17 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
         for chunk in iter(lambda: f.read(chunk_size), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _is_path_allowed(p: Path) -> bool:
+    if ALLOW_ARBITRARY_FILE_ACCESS:
+        return True
+    rp = p.resolve()
+    for base in FILE_ROOTS:
+        if rp == base or base in rp.parents:
+            return True
+    return False
+
 
 def get_cpu_temp_c() -> float:
     """Return highest temperature across all thermal zones in °C."""

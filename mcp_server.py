@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,28 @@ RETRIEVAL_BUDGET_MAX_CALLS = int(os.getenv("CONTEXTCORE_RETRIEVAL_BUDGET", "4"))
 mcp = FastMCP(SERVER_NAME, json_response=True)
 _BUDGET_LOCK = threading.Lock()
 _SESSION_BUDGETS: dict[str, int] = {}
+_SESSION_LAST_QUERY: dict[str, str] = {}
 _FEEDBACK_DB = PROJECT_ROOT / "storage" / "mcp_feedback.db"
+
+LOCAL_FILESYSTEM_TOOLS = {
+    "claude-code",
+    "cline",
+    "aider",
+    "opencode",
+    "goose",
+    "continue",
+    "cursor",
+    "windsurf",
+    "codex",
+}
+REMOTE_ONLY_TOOLS = {
+    "claude-desktop",
+    "claude.ai",
+    "chatgpt-web",
+    "gemini-web",
+    "perplexity",
+    "browser-chat",
+}
 
 
 def _request_json(
@@ -157,6 +180,49 @@ def _consume_budget(session_id: str, reset: bool = False) -> dict[str, Any]:
         }
 
 
+def _reveal_file_in_explorer(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"ok": False, "error": "file_not_found", "path": str(path)}
+
+    try:
+        if sys.platform.startswith("win"):
+            target = str(path.resolve())
+            # Explorer select mode. Quoted form is more reliable for spaces/special chars.
+            try:
+                subprocess.Popen(["explorer.exe", f'/select,"{target}"'])
+            except Exception:
+                # Fallback form used by some shells/setups.
+                subprocess.Popen(["explorer.exe", f"/select,{target}"])
+            return {
+                "ok": True,
+                "opened": "explorer",
+                "path": target,
+                "note": "Requested highlighted selection in Explorer",
+            }
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+            return {"ok": True, "opened": "finder", "path": str(path)}
+
+        # Linux fallback: open containing directory.
+        subprocess.Popen(["xdg-open", str(path.parent)])
+        return {"ok": True, "opened": "file-manager", "path": str(path), "note": "Opened parent directory"}
+    except Exception as exc:
+        return {"ok": False, "error": "reveal_failed", "path": str(path), "message": str(exc)}
+
+
+def _normalize_tool_name(tool: str) -> str:
+    return (tool or "").strip().lower()
+
+
+def _should_auto_reset_budget(session_id: str, query: str) -> bool:
+    sid = session_id.strip() or "default"
+    normalized = " ".join((query or "").strip().lower().split())
+    with _BUDGET_LOCK:
+        prev = _SESSION_LAST_QUERY.get(sid)
+        _SESSION_LAST_QUERY[sid] = normalized
+    return prev != normalized
+
+
 def _load_source_config() -> dict[str, Any]:
     text_base = "/mnt/storage/organized_files"
     text_folders = ["docs", "spreadsheets", "code"]
@@ -236,7 +302,8 @@ def search(
             "message": "modality must be one of: all, text, image, video, audio",
         }
 
-    budget = _consume_budget(session_id=session_id, reset=reset_budget)
+    auto_reset = _should_auto_reset_budget(session_id=session_id, query=query)
+    budget = _consume_budget(session_id=session_id, reset=(reset_budget or auto_reset))
     if not budget.get("ok"):
         return budget
 
@@ -333,6 +400,125 @@ def search(
         "result_count": len(merged),
         "results": merged,
         "empty_or_low_confidence": (not merged) or all(float(r.get("score", 0.0)) < 0.1 for r in merged),
+    }
+
+
+@mcp.tool()
+def list_files(
+    directory: str,
+    recursive: bool = True,
+    limit: int = 100,
+    pattern: str = "*",
+) -> dict[str, Any]:
+    """
+    List files from a local directory (served by backend /files/list) and include fetchable URLs.
+    """
+    bounded_limit = max(1, min(int(limit), 1000))
+    upstream = _request_json(
+        "GET",
+        "/files/list",
+        params={
+            "directory": directory,
+            "recursive": recursive,
+            "limit": bounded_limit,
+            "pattern": pattern,
+        },
+        timeout=30,
+    )
+    if not upstream.get("ok"):
+        return upstream
+
+    data = upstream["data"]
+    rows = data.get("files", []) if isinstance(data, dict) else []
+    out = []
+    for r in rows:
+        p = r.get("path")
+        out.append(
+            {
+                "path": p,
+                "filename": r.get("filename"),
+                "size_bytes": r.get("size_bytes"),
+                "mime_type": r.get("mime_type"),
+                "mtime": r.get("mtime"),
+            }
+        )
+
+    return {
+        "ok": True,
+        "directory": data.get("directory"),
+        "count": len(out),
+        "files": out,
+    }
+
+
+@mcp.tool()
+def reveal_file(path: str) -> dict[str, Any]:
+    """
+    Open the OS file manager with the target file selected so user can drag/drop it into chat.
+    """
+    return _reveal_file_in_explorer(Path(path).expanduser().resolve())
+
+
+@mcp.tool()
+def filesystem_access_profile(tool: str) -> dict[str, Any]:
+    """
+    Return filesystem access mode guidance for a client tool.
+    """
+    t = _normalize_tool_name(tool)
+    if t in LOCAL_FILESYSTEM_TOOLS:
+        return {
+            "ok": True,
+            "tool": t,
+            "access_mode": "direct_local_filesystem",
+            "can_read_absolute_paths": True,
+            "recommended_flow": "return absolute path and let tool open/read directly",
+        }
+    if t in REMOTE_ONLY_TOOLS:
+        return {
+            "ok": True,
+            "tool": t,
+            "access_mode": "remote_no_local_filesystem",
+            "can_read_absolute_paths": False,
+            "recommended_flow": "reveal file in OS explorer and ask user to drag/drop upload",
+        }
+    return {
+        "ok": True,
+        "tool": t,
+        "access_mode": "unknown",
+        "can_read_absolute_paths": False,
+        "recommended_flow": "assume remote unless verified; use reveal + drag/drop flow",
+    }
+
+
+@mcp.tool()
+def prepare_file_for_tool(path: str, tool: str) -> dict[str, Any]:
+    """
+    Prepare a local file for a specific client tool:
+    - local agents: return absolute path for direct read
+    - remote/web tools: open explorer/finder selection for drag-drop flow
+    """
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        return {"ok": False, "error": "file_not_found", "path": str(p)}
+
+    profile = filesystem_access_profile(tool)
+    if profile.get("can_read_absolute_paths"):
+        return {
+            "ok": True,
+            "tool": profile.get("tool"),
+            "access_mode": profile.get("access_mode"),
+            "path": str(p),
+            "next_step": "Tool can read this path directly.",
+        }
+
+    revealed = _reveal_file_in_explorer(p)
+    return {
+        "ok": bool(revealed.get("ok")),
+        "tool": profile.get("tool"),
+        "access_mode": profile.get("access_mode"),
+        "path": str(p),
+        "reveal": revealed,
+        "next_step": "File manager opened. Ask user to drag/drop this file into chat.",
     }
 
 
