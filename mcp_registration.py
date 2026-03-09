@@ -101,7 +101,11 @@ def _default_candidates(tool: str) -> list[Path]:
     if tool == "aider":
         return [userprofile / ".aider.conf.json"]
     if tool == "opencode":
-        return [userprofile / ".opencode" / "config.json"]
+        return [
+            userprofile / ".opencode" / "config.json",
+            userprofile / ".config" / "opencode" / "opencode.json",
+            userprofile / ".config" / "opencode" / "opencode.jsonc",
+        ]
     if tool == "goose":
         return [appdata / "Goose" / "config.json", userprofile / ".goose" / "config.json"]
     if tool in {"claude.ai", "gemini-web", "perplexity", "browser-chat"}:
@@ -114,6 +118,12 @@ def _pick_target_path(tool: str, override: str | None) -> Path:
         return Path(override).expanduser().resolve()
 
     candidates = [p for p in _default_candidates(tool) if str(p) not in ("", ".")]
+    if tool == "opencode" and candidates:
+        # Prefer an existing OpenCode config path first; otherwise use the first default.
+        existing = [p for p in candidates if p.exists()]
+        if existing:
+            return existing[0]
+        return candidates[0]
     existing = [p for p in candidates if p.exists()]
     if existing:
         return existing[0]
@@ -142,8 +152,12 @@ def _backup(path: Path) -> Path | None:
         return None
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     bak = path.with_suffix(path.suffix + f".bak_{ts}")
-    shutil.copy2(path, bak)
-    return bak
+    try:
+        shutil.copy2(path, bak)
+        return bak
+    except PermissionError:
+        # Some tools may lock config locations; proceed without backup.
+        return None
 
 
 def _ensure_parent(path: Path) -> None:
@@ -169,6 +183,40 @@ def _server_entry(project_root: Path, backend_url: str, timeout_seconds: int) ->
             "CONTEXTCORE_MCP_TIMEOUT_SECONDS": str(timeout_seconds),
         },
     }
+
+
+def _opencode_server_entry(project_root: Path) -> dict[str, Any]:
+    # OpenCode local MCP shape: {"mcp": {"name": {"type":"local","command":[...]}}}
+    return {
+        "type": "local",
+        "command": [
+            _resolve_python(project_root),
+            str((project_root / "mcp_server.py").resolve()),
+        ],
+    }
+
+
+def _legacy_opencode_entry_to_mcp_local(legacy: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert legacy mcpServers-style entry:
+      {"command": "...", "args": [...], "env": {...}}
+    to OpenCode's mcp local shape:
+      {"type":"local","command":[...],"environment":{...}}
+    """
+    command = legacy.get("command")
+    args = legacy.get("args") or []
+    env = legacy.get("env")
+
+    cmd_list: list[str] = []
+    if isinstance(command, str) and command.strip():
+        cmd_list.append(command)
+    if isinstance(args, list):
+        cmd_list.extend(str(a) for a in args)
+
+    out: dict[str, Any] = {"type": "local", "command": cmd_list}
+    if isinstance(env, dict):
+        out["environment"] = {str(k): str(v) for k, v in env.items()}
+    return out
 
 
 def _selected_tools(args: argparse.Namespace) -> list[str]:
@@ -203,15 +251,40 @@ def _register_one(
     dry_run: bool,
 ) -> dict[str, Any]:
     data = _read_json(config_path)
-    mcp_servers = data.get("mcpServers")
-    if mcp_servers is None:
-        mcp_servers = {}
-        data["mcpServers"] = mcp_servers
-    if not isinstance(mcp_servers, dict):
-        raise ValueError(f"'mcpServers' must be an object in {config_path}")
 
-    existed = server_name in mcp_servers
-    mcp_servers[server_name] = entry
+    if tool == "opencode":
+        mcp_obj = data.get("mcp")
+        if mcp_obj is None:
+            mcp_obj = {}
+            data["mcp"] = mcp_obj
+        if not isinstance(mcp_obj, dict):
+            raise ValueError(f"'mcp' must be an object in {config_path}")
+        existed = server_name in mcp_obj
+
+        # Migration path: if legacy mcpServers entry exists, convert it.
+        legacy_obj = data.get("mcpServers")
+        if not existed and isinstance(legacy_obj, dict) and server_name in legacy_obj:
+            legacy_entry = legacy_obj.get(server_name)
+            if isinstance(legacy_entry, dict):
+                mcp_obj[server_name] = _legacy_opencode_entry_to_mcp_local(legacy_entry)
+                existed = True
+            else:
+                mcp_obj[server_name] = _opencode_server_entry(Path(__file__).resolve().parent)
+        else:
+            mcp_obj[server_name] = _opencode_server_entry(Path(__file__).resolve().parent)
+
+        # Keep config clean for OpenCode to avoid ambiguity.
+        if isinstance(data.get("mcpServers"), dict):
+            data.pop("mcpServers", None)
+    else:
+        mcp_servers = data.get("mcpServers")
+        if mcp_servers is None:
+            mcp_servers = {}
+            data["mcpServers"] = mcp_servers
+        if not isinstance(mcp_servers, dict):
+            raise ValueError(f"'mcpServers' must be an object in {config_path}")
+        existed = server_name in mcp_servers
+        mcp_servers[server_name] = entry
 
     backup_path = None
     if not dry_run:
@@ -240,7 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true", help="Register for all known tools")
     p.add_argument("--tool", choices=SUPPORTED_TOOLS, help="Alternative to a specific flag")
     p.add_argument("--config", help="Override target config path (single-tool use)")
-    p.add_argument("--server-name", default="contextcore", help="MCP server key name under mcpServers")
+    p.add_argument("--server-name", default="contextcore", help="MCP server key name (mcp for OpenCode, mcpServers for others)")
     p.add_argument("--backend-url", default="http://127.0.0.1:8000")
     p.add_argument("--timeout-seconds", type=int, default=120)
     p.add_argument("--dry-run", action="store_true")
