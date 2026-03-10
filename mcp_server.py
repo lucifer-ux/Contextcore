@@ -10,6 +10,7 @@ Three tools only:
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -53,6 +54,66 @@ REMOTE_ONLY_TOOLS = {
     "gemini-web",
     "perplexity",
     "browser-chat",
+}
+
+VCS_MARKERS = (".git", ".hg", ".svn")
+LANGUAGE_MANIFEST_MARKERS: dict[str, tuple[str, ...]] = {
+    "node": ("package.json",),
+    "python": ("pyproject.toml", "setup.py", "setup.cfg"),
+    "rust": ("Cargo.toml",),
+    "go": ("go.mod",),
+    "java": ("pom.xml", "build.gradle", "build.gradle.kts"),
+    "ruby": ("Gemfile",),
+    "php": ("composer.json",),
+    "elixir": ("mix.exs",),
+    "dart": ("pubspec.yaml",),
+    "dotnet": (".csproj", ".sln"),
+    "c_cpp": ("CMakeLists.txt", "Makefile"),
+}
+FRAMEWORK_MARKERS = (
+    "next.config.js",
+    "vite.config.js",
+    "webpack.config.js",
+    "tsconfig.json",
+    "angular.json",
+    "vue.config.js",
+    ".eslintrc",
+    ".eslintrc.json",
+    ".eslintrc.js",
+    "jest.config.js",
+    "pytest.ini",
+    "phpunit.xml",
+)
+COMMON_EXCLUDE_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "vendor",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".idea",
+    ".vscode",
+    "dist",
+    "build",
+    "out",
+    "target",
+    "coverage",
+}
+EXCLUDES_BY_PROJECT_TYPE: dict[str, set[str]] = {
+    "node": {"node_modules", ".next", "dist", "build", "coverage"},
+    "python": {".venv", "venv", "__pycache__", ".eggs", "build", "dist", ".tox"},
+    "rust": {"target"},
+    "go": {"vendor", "bin"},
+    "java": {"target", ".gradle", "build"},
+    "ruby": {"vendor", ".bundle"},
+    "php": {"vendor"},
+    "dotnet": {"bin", "obj"},
+    "c_cpp": {"build", "out"},
 }
 
 
@@ -252,6 +313,355 @@ def _load_source_config() -> dict[str, Any]:
         "video_folder": "video",
         "audio_folder": "audio",
     }
+
+
+def _manifest_markers_at(path: Path) -> list[str]:
+    markers: list[str] = []
+    for marker in (
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "Cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "Gemfile",
+        "composer.json",
+        "mix.exs",
+        "pubspec.yaml",
+        "CMakeLists.txt",
+        "Makefile",
+    ):
+        if (path / marker).exists():
+            markers.append(marker)
+
+    for ext_marker in (".csproj", ".sln"):
+        if list(path.glob(f"*{ext_marker}")):
+            markers.append(ext_marker)
+    return sorted(set(markers))
+
+
+def _framework_markers_at(path: Path) -> list[str]:
+    found: list[str] = []
+    for marker in FRAMEWORK_MARKERS:
+        if (path / marker).exists():
+            found.append(marker)
+    return sorted(found)
+
+
+def _classify_project_types(root: Path) -> list[str]:
+    types: list[str] = []
+    for project_type, markers in LANGUAGE_MANIFEST_MARKERS.items():
+        for marker in markers:
+            if marker.startswith("."):
+                if list(root.glob(f"*{marker}")):
+                    types.append(project_type)
+                    break
+            elif (root / marker).exists():
+                types.append(project_type)
+                break
+    return sorted(set(types))
+
+
+def _find_project_root(start_path: Path) -> tuple[Path, dict[str, Any]]:
+    current = start_path if start_path.is_dir() else start_path.parent
+    chain = [current, *list(current.parents)]
+
+    for p in chain:
+        found_vcs = [m for m in VCS_MARKERS if (p / m).exists()]
+        if found_vcs:
+            return p, {"method": "vcs", "vcs_markers": found_vcs}
+
+    for p in chain:
+        manifests = _manifest_markers_at(p)
+        if manifests:
+            return p, {"method": "manifest", "manifest_markers": manifests}
+
+    for p in chain:
+        fw = _framework_markers_at(p)
+        if fw:
+            return p, {"method": "framework", "framework_markers": fw}
+
+    return current, {"method": "fallback"}
+
+
+def _classify_name_style(stem: str) -> str:
+    if not stem:
+        return "other"
+    if re.fullmatch(r"[a-z0-9]+(_[a-z0-9]+)+", stem):
+        return "snake"
+    if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)+", stem):
+        return "kebab"
+    if re.fullmatch(r"[a-z]+([A-Z][a-z0-9]*)+", stem):
+        return "camel"
+    return "other"
+
+
+def _scan_code_signals(root: Path, max_scan_files: int) -> dict[str, Any]:
+    file_count = 0
+    test_file_count = 0
+    import_link_count = 0
+    readme_present = any((root / n).exists() for n in ("README", "README.md", "README.txt"))
+    changelog_present = any((root / n).exists() for n in ("CHANGELOG", "CHANGELOG.md", "HISTORY.md"))
+    generated_or_dep_dirs: set[str] = set()
+    name_style_counts = {"snake": 0, "kebab": 0, "camel": 0, "other": 0}
+    base_names: set[str] = set()
+    code_files: list[Path] = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        if file_count >= max_scan_files:
+            break
+        dirnames[:] = [d for d in dirnames if d not in COMMON_EXCLUDE_DIRS]
+        generated_or_dep_dirs.update(d for d in dirnames if d in COMMON_EXCLUDE_DIRS)
+
+        for fname in filenames:
+            if file_count >= max_scan_files:
+                break
+            file_count += 1
+            lower_name = fname.lower()
+            stem = Path(fname).stem
+            name_style_counts[_classify_name_style(stem)] += 1
+            base_names.add(stem.lower())
+
+            if (
+                lower_name.startswith("test_")
+                or lower_name.endswith("_test.py")
+                or ".test." in lower_name
+                or ".spec." in lower_name
+            ):
+                test_file_count += 1
+
+            ext = Path(fname).suffix.lower()
+            if ext in {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".php", ".rb"}:
+                code_files.append(Path(dirpath) / fname)
+
+    for file_path in code_files[: min(len(code_files), 300)]:
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        content = text[:8000]
+        matches = re.findall(r"(?:from|import|require|use|include)\s*(?:\(|from)?\s*['\"]([^'\"]+)['\"]", content)
+        for module in matches:
+            mod = module.strip().split("/")[-1].split(".")[-1].lower()
+            if module.startswith((".", "/")) or mod in base_names:
+                import_link_count += 1
+                if import_link_count >= 10:
+                    break
+        if import_link_count >= 10:
+            break
+
+    dominant_style = max(name_style_counts, key=name_style_counts.get)
+    dominant_count = name_style_counts[dominant_style]
+    naming_consistent = file_count >= 8 and dominant_style != "other" and (dominant_count / max(file_count, 1)) >= 0.65
+
+    return {
+        "file_count_scanned": file_count,
+        "test_file_count": test_file_count,
+        "import_link_count": import_link_count,
+        "readme_present": readme_present,
+        "changelog_present": changelog_present,
+        "generated_or_dependency_dirs_detected": sorted(generated_or_dep_dirs),
+        "naming_consistent": naming_consistent,
+        "dominant_name_style": dominant_style,
+        "name_style_counts": name_style_counts,
+        "scan_truncated": file_count >= max_scan_files,
+    }
+
+
+def _codebase_score(
+    *,
+    root_info: dict[str, Any],
+    manifest_markers: list[str],
+    framework_markers: list[str],
+    scan_signals: dict[str, Any],
+) -> tuple[int, dict[str, int]]:
+    breakdown = {
+        "vcs_marker": 40 if root_info.get("vcs_markers") else 0,
+        "language_manifest": 30 if manifest_markers else 0,
+        "framework_config": 20 if framework_markers else 0,
+        "test_files": 15 if int(scan_signals.get("test_file_count", 0)) > 0 else 0,
+        "inter_file_imports": 15 if int(scan_signals.get("import_link_count", 0)) > 0 else 0,
+        "readme_or_changelog": 10 if scan_signals.get("readme_present") or scan_signals.get("changelog_present") else 0,
+        "consistent_naming": 10 if scan_signals.get("naming_consistent") else 0,
+        "generated_or_dependency_dirs": 10 if scan_signals.get("generated_or_dependency_dirs_detected") else 0,
+    }
+    return sum(breakdown.values()), breakdown
+
+
+@mcp.tool()
+def analyze_code_directory(
+    path: str = ".",
+    threshold: int = 40,
+    max_scan_files: int = 5000,
+) -> dict[str, Any]:
+    """
+    Analyze whether a directory is a software project and return codebase confidence + signals.
+    Uses root-intent markers first, then fallback content signals for ambiguous folders.
+    """
+    target = Path(path).expanduser().resolve()
+    if not target.exists():
+        return {"ok": False, "error": "path_not_found", "path": str(target)}
+    if not target.is_dir():
+        return {"ok": False, "error": "path_not_directory", "path": str(target)}
+
+    bounded_threshold = max(0, min(int(threshold), 100))
+    bounded_scan_limit = max(100, min(int(max_scan_files), 20000))
+
+    project_root, root_info = _find_project_root(target)
+    manifest_markers = _manifest_markers_at(project_root)
+    framework_markers = _framework_markers_at(project_root)
+    project_types = _classify_project_types(project_root)
+    scan_signals = _scan_code_signals(project_root, bounded_scan_limit)
+    score, score_breakdown = _codebase_score(
+        root_info=root_info,
+        manifest_markers=manifest_markers,
+        framework_markers=framework_markers,
+        scan_signals=scan_signals,
+    )
+    is_code_directory = score >= bounded_threshold
+
+    exclusion_dirs = set(COMMON_EXCLUDE_DIRS)
+    for ptype in project_types:
+        exclusion_dirs.update(EXCLUDES_BY_PROJECT_TYPE.get(ptype, set()))
+
+    confidence_band = "low"
+    if score >= 40:
+        confidence_band = "high"
+    elif score >= 20:
+        confidence_band = "medium"
+
+    return {
+        "ok": True,
+        "input_path": str(target),
+        "project_root": str(project_root),
+        "is_code_directory": is_code_directory,
+        "confidence_score": score,
+        "confidence_threshold": bounded_threshold,
+        "confidence_band": confidence_band,
+        "root_detection": {
+            "method": root_info.get("method"),
+            "vcs_markers": root_info.get("vcs_markers", []),
+            "manifest_markers": manifest_markers,
+            "framework_markers": framework_markers,
+        },
+        "project_types": project_types,
+        "score_breakdown": score_breakdown,
+        "signals": scan_signals,
+        "indexing_guidance": {
+            "scope_rule": "Index all files under project_root except excluded directories.",
+            "exclude_directories": sorted(exclusion_dirs),
+        },
+    }
+
+
+@mcp.tool()
+def get_codebase_context(
+    repo_path: str = ".",
+    force_reindex: bool = False,
+    include_all: bool = True,
+    files_limit: int = 500,
+    symbols_limit: int = 2000,
+    threshold: int = 40,
+    max_scan_files: int = 5000,
+) -> dict[str, Any]:
+    """
+    Return full structured Layer 1 + Layer 2 codebase context for agent reasoning.
+
+    Use this at the start of codebase tasks. It returns deterministic facts only:
+    project detection/classification + indexed repository/file/symbol data.
+    """
+    bounded_files_limit = max(1, min(int(files_limit), 20000))
+    bounded_symbols_limit = max(1, min(int(symbols_limit), 100000))
+    upstream = _request_json(
+        "GET",
+        "/index/code/context",
+        params={
+            "path": repo_path,
+            "force_reindex": force_reindex,
+            "include_all": include_all,
+            "files_limit": bounded_files_limit,
+            "symbols_limit": bounded_symbols_limit,
+            "threshold": max(0, min(int(threshold), 100)),
+            "max_scan_files": max(100, min(int(max_scan_files), 20000)),
+        },
+        timeout=120,
+    )
+    return upstream
+
+
+@mcp.tool()
+def get_codebase_index(
+    repo_path: str = ".",
+    recent_days: int = 7,
+    recent_limit: int = 20,
+    symbol_limit: int = 1200,
+    force_reindex: bool = False,
+) -> dict[str, Any]:
+    """
+    First-call orientation tool.
+    Returns structure, symbols index, external deps, and recent changes.
+    """
+    return _request_json(
+        "GET",
+        "/index/code/get_codebase_index",
+        params={
+            "path": repo_path,
+            "recent_days": max(1, min(int(recent_days), 90)),
+            "recent_limit": max(1, min(int(recent_limit), 100)),
+            "symbol_limit": max(1, min(int(symbol_limit), 10000)),
+            "force_reindex": force_reindex,
+        },
+        timeout=120,
+    )
+
+
+@mcp.tool()
+def get_module_detail(
+    repo_path: str,
+    paths: list[str],
+) -> dict[str, Any]:
+    """
+    Targeted module detail tool.
+    Returns full symbol + import details only for requested relative paths.
+    """
+    cleaned = [str(p).replace("\\", "/").strip() for p in paths if str(p).strip()]
+    return _request_json(
+        "POST",
+        "/index/code/get_module_detail",
+        json_body={
+            "repo_path": repo_path,
+            "paths": cleaned,
+        },
+        timeout=120,
+    )
+
+
+@mcp.tool()
+def get_file_content(
+    repo_path: str,
+    path: str,
+    start_line: int = 1,
+    end_line: int | None = None,
+) -> dict[str, Any]:
+    """
+    Raw source read tool for specific file path and optional line range.
+    """
+    params: dict[str, Any] = {
+        "repo_path": repo_path,
+        "path": path,
+        "start_line": max(1, int(start_line)),
+    }
+    if end_line is not None:
+        params["end_line"] = max(1, int(end_line))
+    return _request_json(
+        "GET",
+        "/index/code/get_file_content",
+        params=params,
+        timeout=60,
+    )
 
 
 @mcp.tool()

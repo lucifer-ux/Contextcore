@@ -7,8 +7,12 @@ import shutil
 import builtins
 import fnmatch
 import mimetypes
+import re
+import json
+import ast
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
@@ -93,6 +97,98 @@ FILE_ROOTS = [
     for p in os.getenv("CONTEXTCORE_FILE_ROOTS", "").split(";")
     if p.strip()
 ]
+
+VCS_MARKERS = (".git", ".hg", ".svn")
+LANGUAGE_MANIFEST_MARKERS: dict[str, tuple[str, ...]] = {
+    "node": ("package.json",),
+    "python": ("pyproject.toml", "setup.py", "setup.cfg"),
+    "rust": ("Cargo.toml",),
+    "go": ("go.mod",),
+    "java": ("pom.xml", "build.gradle", "build.gradle.kts"),
+    "ruby": ("Gemfile",),
+    "php": ("composer.json",),
+    "elixir": ("mix.exs",),
+    "dart": ("pubspec.yaml",),
+    "dotnet": (".csproj", ".sln"),
+    "c_cpp": ("CMakeLists.txt", "Makefile"),
+}
+FRAMEWORK_MARKERS = (
+    "next.config.js",
+    "vite.config.js",
+    "webpack.config.js",
+    "tsconfig.json",
+    "angular.json",
+    "vue.config.js",
+    ".eslintrc",
+    ".eslintrc.json",
+    ".eslintrc.js",
+    "jest.config.js",
+    "pytest.ini",
+    "phpunit.xml",
+)
+COMMON_CODE_EXCLUDE_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "vendor",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".idea",
+    ".vscode",
+    "dist",
+    "build",
+    "out",
+    "target",
+    "coverage",
+    ".pnpm-store",
+    ".yarn",
+    ".npm",
+    ".turbo",
+    ".cache",
+    ".parcel-cache",
+    ".nuxt",
+    ".svelte-kit",
+    ".gradle",
+    "obj",
+    "bin",
+    ".cargo",
+}
+EXCLUDES_BY_PROJECT_TYPE: dict[str, set[str]] = {
+    "node": {"node_modules", ".next", "dist", "build", "coverage"},
+    "python": {".venv", "venv", "__pycache__", ".eggs", "build", "dist", ".tox"},
+    "rust": {"target"},
+    "go": {"vendor", "bin"},
+    "java": {"target", ".gradle", "build"},
+    "ruby": {"vendor", ".bundle"},
+    "php": {"vendor"},
+    "dotnet": {"bin", "obj"},
+    "c_cpp": {"build", "out"},
+}
+DEPENDENCY_DIR_NAMES = {
+    "node_modules", "vendor", ".venv", "venv", ".pnpm-store", ".yarn", ".npm", ".cargo"
+}
+GENERATED_DIR_NAMES = {
+    "dist", "build", "out", "target", "coverage", ".cache", ".parcel-cache", ".next", ".nuxt", ".svelte-kit"
+}
+
+CODE_INDEX_DB = ROOT / "storage" / "code_index_layer1.db"
+CODE_INDEX_MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024
+CODE_TEXT_EXTENSIONS = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".rs", ".go", ".java", ".kt", ".kts", ".scala", ".swift",
+    ".rb", ".php", ".cs", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp",
+    ".sql", ".sh", ".bash", ".zsh", ".ps1", ".toml", ".yaml", ".yml",
+    ".json", ".xml", ".ini", ".cfg", ".conf", ".env",
+    ".md", ".txt",
+}
+CODE_SPECIAL_FILENAMES = {
+    "Dockerfile", "Makefile", "CMakeLists.txt", "Jenkinsfile", "Procfile",
+}
 
 # NOTE: No idle-unload — whichever family is loaded stays loaded
 #       until the OTHER family is explicitly requested.
@@ -543,6 +639,1217 @@ def scan_audio_index_wrapper():
         return {"status": "error", "error": str(e)}
 
 
+def _manifest_markers_at(path: Path) -> list[str]:
+    markers: list[str] = []
+    for marker in (
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "Cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "Gemfile",
+        "composer.json",
+        "mix.exs",
+        "pubspec.yaml",
+        "CMakeLists.txt",
+        "Makefile",
+    ):
+        if (path / marker).exists():
+            markers.append(marker)
+    for ext_marker in (".csproj", ".sln"):
+        if list(path.glob(f"*{ext_marker}")):
+            markers.append(ext_marker)
+    return sorted(set(markers))
+
+
+def _framework_markers_at(path: Path) -> list[str]:
+    out: list[str] = []
+    for marker in FRAMEWORK_MARKERS:
+        if (path / marker).exists():
+            out.append(marker)
+    return sorted(out)
+
+
+def _classify_project_types(root: Path) -> list[str]:
+    types: list[str] = []
+    for project_type, markers in LANGUAGE_MANIFEST_MARKERS.items():
+        for marker in markers:
+            if marker.startswith("."):
+                if list(root.glob(f"*{marker}")):
+                    types.append(project_type)
+                    break
+            elif (root / marker).exists():
+                types.append(project_type)
+                break
+    return sorted(set(types))
+
+
+def _find_project_root(start_path: Path) -> tuple[Path, dict[str, Any]]:
+    current = start_path if start_path.is_dir() else start_path.parent
+    chain = [current, *list(current.parents)]
+    for p in chain:
+        found_vcs = [m for m in VCS_MARKERS if (p / m).exists()]
+        if found_vcs:
+            return p, {"method": "vcs", "vcs_markers": found_vcs}
+    for p in chain:
+        manifests = _manifest_markers_at(p)
+        if manifests:
+            return p, {"method": "manifest", "manifest_markers": manifests}
+    for p in chain:
+        fw = _framework_markers_at(p)
+        if fw:
+            return p, {"method": "framework", "framework_markers": fw}
+    return current, {"method": "fallback"}
+
+
+def _classify_name_style(stem: str) -> str:
+    if not stem:
+        return "other"
+    if re.fullmatch(r"[a-z0-9]+(_[a-z0-9]+)+", stem):
+        return "snake"
+    if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)+", stem):
+        return "kebab"
+    if re.fullmatch(r"[a-z]+([A-Z][a-z0-9]*)+", stem):
+        return "camel"
+    return "other"
+
+
+def _scan_code_signals(
+    root: Path,
+    max_scan_files: int,
+    exclude_dirs: set[str] | None = None,
+    gitignore_patterns: list[str] | None = None,
+) -> dict[str, Any]:
+    exclude_dirs = exclude_dirs or set(COMMON_CODE_EXCLUDE_DIRS)
+    gitignore_patterns = gitignore_patterns or []
+    file_count = 0
+    test_file_count = 0
+    import_link_count = 0
+    readme_present = any((root / n).exists() for n in ("README", "README.md", "README.txt"))
+    changelog_present = any((root / n).exists() for n in ("CHANGELOG", "CHANGELOG.md", "HISTORY.md"))
+    generated_or_dep_dirs: set[str] = set()
+    name_style_counts = {"snake": 0, "kebab": 0, "camel": 0, "other": 0}
+    base_names: set[str] = set()
+    code_files: list[Path] = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        if file_count >= max_scan_files:
+            break
+        kept_dirs: list[str] = []
+        for d in dirnames:
+            child = Path(dirpath) / d
+            if _should_skip_code_path(child, root, exclude_dirs, gitignore_patterns):
+                generated_or_dep_dirs.add(d)
+                continue
+            kept_dirs.append(d)
+        dirnames[:] = kept_dirs
+
+        for fname in filenames:
+            if file_count >= max_scan_files:
+                break
+            file_count += 1
+            file_path = Path(dirpath) / fname
+            if _should_skip_code_path(file_path, root, exclude_dirs, gitignore_patterns):
+                continue
+            lower_name = fname.lower()
+            stem = Path(fname).stem
+            name_style_counts[_classify_name_style(stem)] += 1
+            base_names.add(stem.lower())
+
+            if (
+                lower_name.startswith("test_")
+                or lower_name.endswith("_test.py")
+                or ".test." in lower_name
+                or ".spec." in lower_name
+            ):
+                test_file_count += 1
+
+            ext = file_path.suffix.lower()
+            if ext in {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".php", ".rb"}:
+                code_files.append(file_path)
+
+    for file_path in code_files[: min(len(code_files), 300)]:
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        snippet = text[:8000]
+        matches = re.findall(r"(?:from|import|require|use|include)\s*(?:\(|from)?\s*['\"]([^'\"]+)['\"]", snippet)
+        for module in matches:
+            mod = module.strip().split("/")[-1].split(".")[-1].lower()
+            if module.startswith((".", "/")) or mod in base_names:
+                import_link_count += 1
+                if import_link_count >= 10:
+                    break
+        if import_link_count >= 10:
+            break
+
+    dominant_style = max(name_style_counts, key=name_style_counts.get)
+    dominant_count = name_style_counts[dominant_style]
+    naming_consistent = file_count >= 8 and dominant_style != "other" and (dominant_count / max(file_count, 1)) >= 0.65
+
+    return {
+        "file_count_scanned": file_count,
+        "test_file_count": test_file_count,
+        "import_link_count": import_link_count,
+        "readme_present": readme_present,
+        "changelog_present": changelog_present,
+        "generated_or_dependency_dirs_detected": sorted(generated_or_dep_dirs),
+        "naming_consistent": naming_consistent,
+        "dominant_name_style": dominant_style,
+        "name_style_counts": name_style_counts,
+        "scan_truncated": file_count >= max_scan_files,
+    }
+
+
+def _load_gitignore_patterns(root: Path) -> list[str]:
+    gitignore = root / ".gitignore"
+    if not gitignore.exists():
+        return []
+    patterns: list[str] = []
+    try:
+        lines = gitignore.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return []
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        # Skip negation rules for now; this is a strict exclude pass.
+        if s.startswith("!"):
+            continue
+        if s.startswith("/"):
+            s = s[1:]
+        patterns.append(s)
+    return patterns
+
+
+def _matches_gitignore(rel_posix: str, name: str, patterns: list[str]) -> bool:
+    for patt in patterns:
+        if patt.endswith("/"):
+            prefix = patt.rstrip("/")
+            if rel_posix == prefix or rel_posix.startswith(prefix + "/"):
+                return True
+            continue
+        if "/" in patt:
+            if fnmatch.fnmatch(rel_posix, patt):
+                return True
+        else:
+            if fnmatch.fnmatch(name, patt) or fnmatch.fnmatch(rel_posix, f"*/{patt}"):
+                return True
+    return False
+
+
+def _should_skip_code_path(path: Path, repo_root: Path, exclude_dirs: set[str], gitignore_patterns: list[str]) -> bool:
+    try:
+        rel_posix = str(path.resolve().relative_to(repo_root).as_posix())
+    except Exception:
+        rel_posix = path.name
+    parts = set(Path(rel_posix).parts)
+    if parts & exclude_dirs:
+        return True
+    if _matches_gitignore(rel_posix, path.name, gitignore_patterns):
+        return True
+    return False
+
+
+def _categorize_top_level_dirs(repo_root: Path) -> dict[str, Any]:
+    categorized = {
+        "application_code": [],
+        "dependency_code": [],
+        "generated_code": [],
+        "configuration": [],
+    }
+    for child in repo_root.iterdir():
+        if not child.is_dir():
+            continue
+        name = child.name
+        lname = name.lower()
+        if lname in DEPENDENCY_DIR_NAMES:
+            categorized["dependency_code"].append(name)
+        elif lname in GENERATED_DIR_NAMES:
+            categorized["generated_code"].append(name)
+        elif lname.startswith("."):
+            categorized["configuration"].append(name)
+        else:
+            categorized["application_code"].append(name)
+    for k in categorized:
+        categorized[k] = sorted(categorized[k])
+    return {
+        "directories_by_category": categorized,
+        "counts": {k: len(v) for k, v in categorized.items()},
+    }
+
+
+def _codebase_score(
+    *,
+    root_info: dict[str, Any],
+    manifest_markers: list[str],
+    framework_markers: list[str],
+    scan_signals: dict[str, Any],
+) -> tuple[int, dict[str, int]]:
+    breakdown = {
+        "vcs_marker": 40 if root_info.get("vcs_markers") else 0,
+        "language_manifest": 30 if manifest_markers else 0,
+        "framework_config": 20 if framework_markers else 0,
+        "test_files": 15 if int(scan_signals.get("test_file_count", 0)) > 0 else 0,
+        "inter_file_imports": 15 if int(scan_signals.get("import_link_count", 0)) > 0 else 0,
+        "readme_or_changelog": 10 if scan_signals.get("readme_present") or scan_signals.get("changelog_present") else 0,
+        "consistent_naming": 10 if scan_signals.get("naming_consistent") else 0,
+        "generated_or_dependency_dirs": 10 if scan_signals.get("generated_or_dependency_dirs_detected") else 0,
+    }
+    return sum(breakdown.values()), breakdown
+
+
+def analyze_code_directory(path: Path, threshold: int = 40, max_scan_files: int = 5000) -> dict[str, Any]:
+    target = path.resolve()
+    if not target.exists():
+        return {"ok": False, "error": "path_not_found", "path": str(target)}
+    if not target.is_dir():
+        return {"ok": False, "error": "path_not_directory", "path": str(target)}
+
+    bounded_threshold = max(0, min(int(threshold), 100))
+    bounded_scan_limit = max(100, min(int(max_scan_files), 20000))
+
+    project_root, root_info = _find_project_root(target)
+    manifest_markers = _manifest_markers_at(project_root)
+    framework_markers = _framework_markers_at(project_root)
+    project_types = _classify_project_types(project_root)
+    exclusion_dirs = set(COMMON_CODE_EXCLUDE_DIRS)
+    for ptype in project_types:
+        exclusion_dirs.update(EXCLUDES_BY_PROJECT_TYPE.get(ptype, set()))
+    gitignore_patterns = _load_gitignore_patterns(project_root)
+    scan_signals = _scan_code_signals(
+        project_root,
+        bounded_scan_limit,
+        exclude_dirs=exclusion_dirs,
+        gitignore_patterns=gitignore_patterns,
+    )
+    score, score_breakdown = _codebase_score(
+        root_info=root_info,
+        manifest_markers=manifest_markers,
+        framework_markers=framework_markers,
+        scan_signals=scan_signals,
+    )
+    is_code_directory = score >= bounded_threshold
+
+    confidence_band = "low"
+    if score >= 40:
+        confidence_band = "high"
+    elif score >= 20:
+        confidence_band = "medium"
+    folder_classification = _categorize_top_level_dirs(project_root)
+
+    return {
+        "ok": True,
+        "input_path": str(target),
+        "project_root": str(project_root),
+        "is_code_directory": is_code_directory,
+        "confidence_score": score,
+        "confidence_threshold": bounded_threshold,
+        "confidence_band": confidence_band,
+        "root_detection": {
+            "method": root_info.get("method"),
+            "vcs_markers": root_info.get("vcs_markers", []),
+            "manifest_markers": manifest_markers,
+            "framework_markers": framework_markers,
+        },
+        "project_types": project_types,
+        "project_classification": folder_classification,
+        "score_breakdown": score_breakdown,
+        "signals": scan_signals,
+        "indexing_guidance": {
+            "scope_rule": "Index all files under project_root except excluded directories.",
+            "exclude_directories": sorted(exclusion_dirs),
+            "gitignore_patterns_count": len(gitignore_patterns),
+        },
+    }
+
+
+def scan_code_index_wrapper(path: Optional[str] = None) -> dict[str, Any]:
+    try:
+        root = Path(path).expanduser().resolve() if path else ORGANIZED_ROOT
+        analysis = analyze_code_directory(root)
+        build = build_code_layer1_index(root)
+        storage_dir = ROOT / "storage"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        report_path = storage_dir / "code_index_analysis_latest.json"
+        report_path.write_text(json.dumps({"analysis": analysis, "build": build}, indent=2), encoding="utf-8")
+        return {"status": "ok", "analysis": analysis, "build": build, "report_path": str(report_path)}
+    except Exception as e:
+        traceback.print_exc()
+        return {"status": "error", "error": str(e)}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _code_db_conn() -> sqlite3.Connection:
+    CODE_INDEX_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(CODE_INDEX_DB))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def _init_code_index_db() -> None:
+    conn = _code_db_conn()
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS repositories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_path TEXT UNIQUE NOT NULL,
+            repo_name TEXT NOT NULL,
+            first_indexed_at TEXT NOT NULL,
+            last_indexed_at TEXT NOT NULL,
+            total_file_count INTEGER NOT NULL DEFAULT 0,
+            total_line_count INTEGER NOT NULL DEFAULT 0,
+            directory_stats_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id INTEGER NOT NULL,
+            abs_path TEXT UNIQUE NOT NULL,
+            rel_path TEXT NOT NULL,
+            extension TEXT,
+            language TEXT,
+            line_count INTEGER NOT NULL DEFAULT 0,
+            mtime REAL NOT NULL,
+            last_indexed_at TEXT NOT NULL,
+            module_docstring TEXT,
+            external_imports_json TEXT NOT NULL DEFAULT '[]',
+            internal_imports_json TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY(repo_id) REFERENCES repositories(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS symbols (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id INTEGER NOT NULL,
+            file_id INTEGER NOT NULL,
+            symbol_name TEXT NOT NULL,
+            symbol_type TEXT NOT NULL,
+            signature TEXT,
+            docstring TEXT,
+            start_line INTEGER,
+            end_line INTEGER,
+            is_public INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY(repo_id) REFERENCES repositories(id) ON DELETE CASCADE,
+            FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_files_repo ON files(repo_id);
+        CREATE INDEX IF NOT EXISTS idx_files_rel ON files(repo_id, rel_path);
+        CREATE INDEX IF NOT EXISTS idx_symbols_repo_name ON symbols(repo_id, symbol_name);
+        CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
+
+        CREATE TABLE IF NOT EXISTS project_structure (
+            repo_path TEXT PRIMARY KEY,
+            repo_name TEXT NOT NULL,
+            total_files INTEGER NOT NULL DEFAULT 0,
+            total_lines INTEGER NOT NULL DEFAULT 0,
+            language_distribution TEXT NOT NULL DEFAULT '{}',
+            directory_map TEXT NOT NULL DEFAULT '{}',
+            last_scanned TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS project_files (
+            file_path TEXT PRIMARY KEY,
+            repo_path TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            extension TEXT,
+            line_count INTEGER NOT NULL DEFAULT 0,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            last_modified REAL NOT NULL,
+            is_entry_point INTEGER NOT NULL DEFAULT 0,
+            is_test_file INTEGER NOT NULL DEFAULT 0,
+            is_config_file INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS code_symbols (
+            symbol_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_path TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            symbol_name TEXT NOT NULL,
+            symbol_type TEXT NOT NULL,
+            signature TEXT,
+            docstring_brief TEXT,
+            line_start INTEGER,
+            line_end INTEGER,
+            is_public INTEGER NOT NULL DEFAULT 1,
+            language TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS external_dependencies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_path TEXT NOT NULL,
+            package_name TEXT NOT NULL,
+            version TEXT,
+            dependency_type TEXT,
+            source_file TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS internal_dependencies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_path TEXT NOT NULL,
+            source_file TEXT NOT NULL,
+            imported_file TEXT,
+            import_statement TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_project_files_repo ON project_files(repo_path);
+        CREATE INDEX IF NOT EXISTS idx_project_files_mtime ON project_files(repo_path, last_modified DESC);
+        CREATE INDEX IF NOT EXISTS idx_code_symbols_repo_name ON code_symbols(repo_path, symbol_name);
+        CREATE INDEX IF NOT EXISTS idx_code_symbols_repo_file ON code_symbols(repo_path, relative_path);
+        CREATE INDEX IF NOT EXISTS idx_ext_deps_repo ON external_dependencies(repo_path);
+        CREATE INDEX IF NOT EXISTS idx_int_deps_repo ON internal_dependencies(repo_path);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def _language_from_path(path: Path) -> str:
+    name = path.name.lower()
+    ext = path.suffix.lower()
+    if name == "dockerfile":
+        return "dockerfile"
+    if name == "makefile":
+        return "make"
+    if name == "cmakelists.txt":
+        return "cmake"
+    return {
+        ".py": "python",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".mjs": "javascript",
+        ".cjs": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".rs": "rust",
+        ".go": "go",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".kts": "kotlin",
+        ".scala": "scala",
+        ".swift": "swift",
+        ".rb": "ruby",
+        ".php": "php",
+        ".cs": "csharp",
+        ".cpp": "cpp",
+        ".cc": "cpp",
+        ".cxx": "cpp",
+        ".c": "c",
+        ".h": "c",
+        ".hpp": "cpp",
+        ".sql": "sql",
+        ".sh": "shell",
+        ".bash": "shell",
+        ".zsh": "shell",
+        ".ps1": "powershell",
+        ".toml": "toml",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".json": "json",
+        ".xml": "xml",
+        ".ini": "ini",
+        ".cfg": "config",
+        ".conf": "config",
+        ".env": "env",
+        ".md": "markdown",
+        ".txt": "text",
+    }.get(ext, "unknown")
+
+
+def _is_code_candidate(path: Path) -> bool:
+    if path.name in CODE_SPECIAL_FILENAMES:
+        return True
+    return path.suffix.lower() in CODE_TEXT_EXTENSIONS
+
+
+def _safe_read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _py_func_signature(node: ast.AST) -> str:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ""
+    parts = []
+    for arg in node.args.args:
+        parts.append(arg.arg)
+    if node.args.vararg:
+        parts.append("*" + node.args.vararg.arg)
+    for arg in node.args.kwonlyargs:
+        parts.append(arg.arg)
+    if node.args.kwarg:
+        parts.append("**" + node.args.kwarg.arg)
+    prefix = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
+    return f"{prefix}{node.name}({', '.join(parts)})"
+
+
+def _extract_python_symbols_and_imports(content: str) -> dict[str, Any]:
+    symbols: list[dict[str, Any]] = []
+    external: set[str] = set()
+    internal: set[str] = set()
+    module_doc = None
+    try:
+        tree = ast.parse(content)
+        module_doc = ast.get_docstring(tree)
+    except Exception:
+        return {
+            "module_docstring": module_doc,
+            "external_imports": [],
+            "internal_imports": [],
+            "symbols": [],
+        }
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for n in node.names:
+                external.add(n.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            target = (node.module or "").split(".")[0]
+            if node.level and node.level > 0:
+                if target:
+                    internal.add(target)
+            elif target:
+                external.add(target)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            symbols.append(
+                {
+                    "name": node.name,
+                    "type": "function",
+                    "signature": _py_func_signature(node),
+                    "docstring": ast.get_docstring(node),
+                    "start_line": int(getattr(node, "lineno", 0) or 0),
+                    "end_line": int(getattr(node, "end_lineno", 0) or 0),
+                    "is_public": 0 if node.name.startswith("_") else 1,
+                }
+            )
+        elif isinstance(node, ast.ClassDef):
+            base_names: list[str] = []
+            for b in node.bases:
+                try:
+                    base_names.append(ast.unparse(b))
+                except Exception:
+                    pass
+            signature = f"class {node.name}"
+            if base_names:
+                signature += f"({', '.join(base_names)})"
+            symbols.append(
+                {
+                    "name": node.name,
+                    "type": "class",
+                    "signature": signature,
+                    "docstring": ast.get_docstring(node),
+                    "start_line": int(getattr(node, "lineno", 0) or 0),
+                    "end_line": int(getattr(node, "end_lineno", 0) or 0),
+                    "is_public": 0 if node.name.startswith("_") else 1,
+                }
+            )
+
+    return {
+        "module_docstring": module_doc,
+        "external_imports": sorted(external),
+        "internal_imports": sorted(internal),
+        "symbols": symbols,
+    }
+
+
+def _extract_js_like_symbols_and_imports(content: str) -> dict[str, Any]:
+    external: set[str] = set()
+    internal: set[str] = set()
+    symbols: list[dict[str, Any]] = []
+
+    import_matches = re.findall(r"(?:import\s+.*?\s+from\s+|require\(|import\()\s*['\"]([^'\"]+)['\"]", content)
+    for item in import_matches:
+        if item.startswith(("./", "../", "/")):
+            internal.add(item)
+        else:
+            external.add(item.split("/")[0])
+
+    for m in re.finditer(r"^\s*export\s+class\s+([A-Za-z_]\w*)", content, flags=re.M):
+        symbols.append(
+            {
+                "name": m.group(1),
+                "type": "class",
+                "signature": f"class {m.group(1)}",
+                "docstring": None,
+                "start_line": content.count("\n", 0, m.start()) + 1,
+                "end_line": None,
+                "is_public": 1,
+            }
+        )
+    for m in re.finditer(r"^\s*(?:export\s+)?function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", content, flags=re.M):
+        symbols.append(
+            {
+                "name": m.group(1),
+                "type": "function",
+                "signature": f"function {m.group(1)}({m.group(2).strip()})",
+                "docstring": None,
+                "start_line": content.count("\n", 0, m.start()) + 1,
+                "end_line": None,
+                "is_public": 0 if m.group(1).startswith("_") else 1,
+            }
+        )
+
+    return {
+        "module_docstring": None,
+        "external_imports": sorted(external),
+        "internal_imports": sorted(internal),
+        "symbols": symbols,
+    }
+
+
+def _extract_rust_symbols_and_imports(content: str) -> dict[str, Any]:
+    external: set[str] = set()
+    internal: set[str] = set()
+    symbols: list[dict[str, Any]] = []
+
+    for m in re.finditer(r"^\s*use\s+([^;]+);", content, flags=re.M):
+        imp = m.group(1).strip()
+        if imp.startswith(("crate::", "super::", "self::")):
+            internal.add(imp)
+        else:
+            external.add(imp.split("::")[0])
+
+    for m in re.finditer(r"^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", content, flags=re.M):
+        name = m.group(1)
+        symbols.append(
+            {
+                "name": name,
+                "type": "function",
+                "signature": f"fn {name}({m.group(2).strip()})",
+                "docstring": None,
+                "start_line": content.count("\n", 0, m.start()) + 1,
+                "end_line": None,
+                "is_public": 1 if re.search(r"^\s*pub\s+fn", m.group(0)) else 0,
+            }
+        )
+    for m in re.finditer(r"^\s*(?:pub\s+)?(struct|trait|enum)\s+([A-Za-z_]\w*)", content, flags=re.M):
+        kind = m.group(1)
+        name = m.group(2)
+        symbols.append(
+            {
+                "name": name,
+                "type": "class",
+                "signature": f"{kind} {name}",
+                "docstring": None,
+                "start_line": content.count("\n", 0, m.start()) + 1,
+                "end_line": None,
+                "is_public": 1 if re.search(r"^\s*pub\s+", m.group(0)) else 0,
+            }
+        )
+
+    return {
+        "module_docstring": None,
+        "external_imports": sorted(external),
+        "internal_imports": sorted(internal),
+        "symbols": symbols,
+    }
+
+
+def _extract_code_facts(path: Path, language: str, content: str) -> dict[str, Any]:
+    if language == "python":
+        return _extract_python_symbols_and_imports(content)
+    if language in {"javascript", "typescript"}:
+        return _extract_js_like_symbols_and_imports(content)
+    if language == "rust":
+        return _extract_rust_symbols_and_imports(content)
+    return {
+        "module_docstring": None,
+        "external_imports": [],
+        "internal_imports": [],
+        "symbols": [],
+    }
+
+
+def _build_directory_stats(rows: list[sqlite3.Row]) -> dict[str, dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        rel_path = str(r["rel_path"])
+        top = rel_path.split("/", 1)[0] if "/" in rel_path else "."
+        ext = (r["extension"] or "").lower()
+        b = buckets.setdefault(top, {"file_count": 0, "ext_counts": {}})
+        b["file_count"] += 1
+        b["ext_counts"][ext] = b["ext_counts"].get(ext, 0) + 1
+
+    out: dict[str, dict[str, Any]] = {}
+    for top, b in buckets.items():
+        ext_counts = b["ext_counts"]
+        dominant = None
+        if ext_counts:
+            dominant = max(ext_counts.items(), key=lambda it: it[1])[0] or "<no_ext>"
+        out[top] = {"file_count": b["file_count"], "dominant_extension": dominant}
+    return out
+
+
+def _is_entry_point_file(rel_path: str, filename: str) -> bool:
+    lname = filename.lower()
+    rel = rel_path.lower()
+    entry_names = {
+        "main.py", "app.py", "server.py", "manage.py", "cli.py",
+        "index.js", "index.ts", "main.rs", "main.go", "program.cs",
+    }
+    if lname in entry_names:
+        return True
+    return rel.startswith("cmd/") or "/cmd/" in rel or rel.startswith("bin/") or "/bin/" in rel
+
+
+def _is_test_file_name(filename: str) -> bool:
+    n = filename.lower()
+    return n.startswith("test_") or n.endswith("_test.py") or ".test." in n or ".spec." in n
+
+
+def _is_config_file(path: Path) -> bool:
+    if path.name.startswith("."):
+        return True
+    return path.suffix.lower() in {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env", ".xml"}
+
+
+def _doc_brief(text: str | None, max_chars: int = 100) -> str | None:
+    if not text:
+        return None
+    first = text.strip().splitlines()[0].strip() if text.strip() else ""
+    return first[:max_chars] if first else None
+
+
+def _extract_manifest_dependencies(project_root: Path) -> list[dict[str, str]]:
+    deps: list[dict[str, str]] = []
+
+    # package.json
+    pkg = project_root / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(_safe_read_text(pkg))
+            for dep_type, dep_key in (("runtime", "dependencies"), ("dev", "devDependencies"), ("optional", "optionalDependencies")):
+                items = data.get(dep_key, {})
+                if isinstance(items, dict):
+                    for name, version in items.items():
+                        deps.append(
+                            {
+                                "package_name": str(name),
+                                "version": str(version),
+                                "dependency_type": dep_type,
+                                "source_file": "package.json",
+                            }
+                        )
+        except Exception:
+            pass
+
+    # pyproject.toml naive parse
+    pyproject = project_root / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            text = _safe_read_text(pyproject)
+            for line in text.splitlines():
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                m = re.match(r'^([A-Za-z0-9_.\-]+)\s*=\s*["\']([^"\']+)["\']', s)
+                if m and m.group(1).lower() not in {"name", "version", "description"}:
+                    deps.append(
+                        {
+                            "package_name": m.group(1),
+                            "version": m.group(2),
+                            "dependency_type": "runtime",
+                            "source_file": "pyproject.toml",
+                        }
+                    )
+        except Exception:
+            pass
+
+    # Cargo.toml naive parse
+    cargo = project_root / "Cargo.toml"
+    if cargo.exists():
+        try:
+            text = _safe_read_text(cargo)
+            in_deps = False
+            for line in text.splitlines():
+                s = line.strip()
+                if s.startswith("["):
+                    in_deps = s in {"[dependencies]", "[dev-dependencies]"}
+                    continue
+                if not in_deps or not s or s.startswith("#"):
+                    continue
+                m = re.match(r'^([A-Za-z0-9_.\-]+)\s*=\s*(.+)$', s)
+                if m:
+                    deps.append(
+                        {
+                            "package_name": m.group(1),
+                            "version": m.group(2).strip().strip('"'),
+                            "dependency_type": "runtime",
+                            "source_file": "Cargo.toml",
+                        }
+                    )
+        except Exception:
+            pass
+
+    # go.mod naive parse
+    gomod = project_root / "go.mod"
+    if gomod.exists():
+        try:
+            text = _safe_read_text(gomod)
+            for line in text.splitlines():
+                s = line.strip()
+                if not s or s.startswith("//") or s.startswith(("module ", "go ", "require (", ")")):
+                    continue
+                parts = s.split()
+                if len(parts) >= 2:
+                    deps.append(
+                        {
+                            "package_name": parts[0],
+                            "version": parts[1],
+                            "dependency_type": "runtime",
+                            "source_file": "go.mod",
+                        }
+                    )
+        except Exception:
+            pass
+
+    uniq = {}
+    for d in deps:
+        key = (d["package_name"], d["version"], d["dependency_type"], d["source_file"])
+        uniq[key] = d
+    return list(uniq.values())
+
+
+def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20000) -> dict[str, Any]:
+    _init_code_index_db()
+    analysis = analyze_code_directory(path)
+    if not analysis.get("ok"):
+        return {"status": "error", "error": analysis.get("error"), "path": str(path)}
+    if not analysis.get("is_code_directory"):
+        return {
+            "status": "skipped_not_code_directory",
+            "analysis": analysis,
+        }
+
+    project_root = Path(analysis["project_root"]).resolve()
+    exclude_dirs = set(analysis.get("indexing_guidance", {}).get("exclude_directories", []))
+    gitignore_patterns = _load_gitignore_patterns(project_root)
+    now = _now_iso()
+    conn = _code_db_conn()
+    indexed = 0
+    skipped_unchanged = 0
+    skipped_noncode = 0
+    failed = 0
+    scanned = 0
+    seen_abs_paths: set[str] = set()
+
+    row = conn.execute("SELECT id, first_indexed_at FROM repositories WHERE root_path=?", (str(project_root),)).fetchone()
+    if row:
+        repo_id = int(row["id"])
+        first_indexed_at = str(row["first_indexed_at"])
+    else:
+        conn.execute(
+            """
+            INSERT INTO repositories(root_path, repo_name, first_indexed_at, last_indexed_at, total_file_count, total_line_count, directory_stats_json)
+            VALUES (?, ?, ?, ?, 0, 0, '{}')
+            """,
+            (str(project_root), project_root.name, now, now),
+        )
+        repo_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        first_indexed_at = now
+
+    # Layer 3 reset for this repo before rebuild pass.
+    conn.execute("DELETE FROM external_dependencies WHERE repo_path=?", (str(project_root),))
+    conn.execute("DELETE FROM internal_dependencies WHERE repo_path=?", (str(project_root),))
+
+    manifest_deps = _extract_manifest_dependencies(project_root)
+    for dep in manifest_deps:
+        conn.execute(
+            """
+            INSERT INTO external_dependencies(repo_path, package_name, version, dependency_type, source_file)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(project_root),
+                dep.get("package_name"),
+                dep.get("version"),
+                dep.get("dependency_type"),
+                dep.get("source_file"),
+            ),
+        )
+
+    for dirpath, dirnames, filenames in os.walk(project_root):
+        kept_dirs: list[str] = []
+        for d in dirnames:
+            child = Path(dirpath) / d
+            if _should_skip_code_path(child, project_root, exclude_dirs, gitignore_patterns):
+                continue
+            kept_dirs.append(d)
+        dirnames[:] = kept_dirs
+        for fname in filenames:
+            if scanned >= max_files:
+                break
+            scanned += 1
+            file_path = Path(dirpath) / fname
+            if _should_skip_code_path(file_path, project_root, exclude_dirs, gitignore_patterns):
+                skipped_noncode += 1
+                continue
+            if not _is_code_candidate(file_path):
+                skipped_noncode += 1
+                continue
+            if should_ignore(file_path):
+                skipped_noncode += 1
+                continue
+
+            try:
+                stat = file_path.stat()
+                if stat.st_size > CODE_INDEX_MAX_FILE_SIZE_BYTES:
+                    skipped_noncode += 1
+                    continue
+                mtime = float(stat.st_mtime)
+                abs_path = str(file_path.resolve())
+                rel_path = str(file_path.resolve().relative_to(project_root)).replace("\\", "/")
+                ext = file_path.suffix.lower()
+                lang = _language_from_path(file_path)
+                seen_abs_paths.add(abs_path)
+
+                existing = conn.execute(
+                    "SELECT id, mtime FROM files WHERE abs_path=?",
+                    (abs_path,),
+                ).fetchone()
+                if existing and (not force) and abs(float(existing["mtime"]) - mtime) < 1e-6:
+                    has_pf = conn.execute(
+                        "SELECT 1 FROM project_files WHERE file_path=? LIMIT 1",
+                        (abs_path,),
+                    ).fetchone()
+                    has_cs = conn.execute(
+                        "SELECT 1 FROM code_symbols WHERE file_path=? LIMIT 1",
+                        (abs_path,),
+                    ).fetchone()
+                    if has_pf and has_cs:
+                        skipped_unchanged += 1
+                        continue
+
+                content = _safe_read_text(file_path)
+                line_count = content.count("\n") + (1 if content else 0)
+                facts = _extract_code_facts(file_path, lang, content)
+
+                conn.execute(
+                    """
+                    INSERT INTO files(
+                        repo_id, abs_path, rel_path, extension, language, line_count, mtime,
+                        last_indexed_at, module_docstring, external_imports_json, internal_imports_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(abs_path) DO UPDATE SET
+                        repo_id=excluded.repo_id,
+                        rel_path=excluded.rel_path,
+                        extension=excluded.extension,
+                        language=excluded.language,
+                        line_count=excluded.line_count,
+                        mtime=excluded.mtime,
+                        last_indexed_at=excluded.last_indexed_at,
+                        module_docstring=excluded.module_docstring,
+                        external_imports_json=excluded.external_imports_json,
+                        internal_imports_json=excluded.internal_imports_json
+                    """,
+                    (
+                        repo_id,
+                        abs_path,
+                        rel_path,
+                        ext,
+                        lang,
+                        line_count,
+                        mtime,
+                        now,
+                        facts.get("module_docstring"),
+                        json.dumps(facts.get("external_imports", [])),
+                        json.dumps(facts.get("internal_imports", [])),
+                    ),
+                )
+                file_row = conn.execute("SELECT id FROM files WHERE abs_path=?", (abs_path,)).fetchone()
+                if not file_row:
+                    failed += 1
+                    continue
+                file_id = int(file_row["id"])
+                conn.execute("DELETE FROM symbols WHERE file_id=?", (file_id,))
+                conn.execute("DELETE FROM code_symbols WHERE repo_path=? AND file_path=?", (str(project_root), abs_path))
+                conn.execute("DELETE FROM internal_dependencies WHERE repo_path=? AND source_file=?", (str(project_root), rel_path))
+                for s in facts.get("symbols", []):
+                    conn.execute(
+                        """
+                        INSERT INTO symbols(
+                            repo_id, file_id, symbol_name, symbol_type, signature, docstring,
+                            start_line, end_line, is_public
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            repo_id,
+                            file_id,
+                            s.get("name"),
+                            s.get("type"),
+                            s.get("signature"),
+                            s.get("docstring"),
+                            s.get("start_line"),
+                            s.get("end_line"),
+                            int(s.get("is_public", 1)),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO code_symbols(
+                            repo_path, file_path, relative_path, symbol_name, symbol_type, signature,
+                            docstring_brief, line_start, line_end, is_public, language
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(project_root),
+                            abs_path,
+                            rel_path,
+                            s.get("name"),
+                            s.get("type"),
+                            s.get("signature"),
+                            _doc_brief(s.get("docstring")),
+                            s.get("start_line"),
+                            s.get("end_line"),
+                            int(s.get("is_public", 1)),
+                            lang,
+                        ),
+                    )
+
+                # Layer 1 normalized file row.
+                conn.execute(
+                    """
+                    INSERT INTO project_files(
+                        file_path, repo_path, relative_path, extension, line_count, size_bytes, last_modified,
+                        is_entry_point, is_test_file, is_config_file
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(file_path) DO UPDATE SET
+                        repo_path=excluded.repo_path,
+                        relative_path=excluded.relative_path,
+                        extension=excluded.extension,
+                        line_count=excluded.line_count,
+                        size_bytes=excluded.size_bytes,
+                        last_modified=excluded.last_modified,
+                        is_entry_point=excluded.is_entry_point,
+                        is_test_file=excluded.is_test_file,
+                        is_config_file=excluded.is_config_file
+                    """,
+                    (
+                        abs_path,
+                        str(project_root),
+                        rel_path,
+                        ext,
+                        line_count,
+                        int(stat.st_size),
+                        mtime,
+                        1 if _is_entry_point_file(rel_path, fname) else 0,
+                        1 if _is_test_file_name(fname) else 0,
+                        1 if _is_config_file(file_path) else 0,
+                    ),
+                )
+
+                for internal in facts.get("internal_imports", []):
+                    conn.execute(
+                        """
+                        INSERT INTO internal_dependencies(repo_path, source_file, imported_file, import_statement)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (str(project_root), rel_path, None, str(internal)),
+                    )
+                indexed += 1
+            except Exception:
+                failed += 1
+                traceback.print_exc()
+        if scanned >= max_files:
+            break
+
+    repo_files = conn.execute(
+        "SELECT rel_path, extension, line_count, language FROM files WHERE repo_id=?",
+        (repo_id,),
+    ).fetchall()
+
+    # Remove stale rows for deleted files.
+    stale_rows = conn.execute("SELECT abs_path FROM files WHERE repo_id=?", (repo_id,)).fetchall()
+    stale_abs = [str(r["abs_path"]) for r in stale_rows if str(r["abs_path"]) not in seen_abs_paths]
+    for abs_path in stale_abs:
+        conn.execute("DELETE FROM files WHERE abs_path=?", (abs_path,))
+        conn.execute("DELETE FROM project_files WHERE file_path=?", (abs_path,))
+        conn.execute("DELETE FROM code_symbols WHERE file_path=?", (abs_path,))
+
+    # Refresh repo files snapshot after stale cleanup.
+    repo_files = conn.execute(
+        "SELECT rel_path, extension, line_count, language FROM files WHERE repo_id=?",
+        (repo_id,),
+    ).fetchall()
+    total_file_count = len(repo_files)
+    total_line_count = sum(int(r["line_count"] or 0) for r in repo_files)
+    dir_stats = _build_directory_stats(repo_files)
+
+    conn.execute(
+        """
+        UPDATE repositories
+        SET last_indexed_at=?, total_file_count=?, total_line_count=?, directory_stats_json=?
+        WHERE id=?
+        """,
+        (now, total_file_count, total_line_count, json.dumps(dir_stats), repo_id),
+    )
+
+    # Keep Layer 1 aggregate table synchronized.
+    lang_dist: dict[str, int] = {}
+    for r in repo_files:
+        lang = str(r["language"] or "unknown")
+        lang_dist[lang] = lang_dist.get(lang, 0) + 1
+    conn.execute(
+        """
+        INSERT INTO project_structure(
+            repo_path, repo_name, total_files, total_lines, language_distribution, directory_map, last_scanned
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repo_path) DO UPDATE SET
+            repo_name=excluded.repo_name,
+            total_files=excluded.total_files,
+            total_lines=excluded.total_lines,
+            language_distribution=excluded.language_distribution,
+            directory_map=excluded.directory_map,
+            last_scanned=excluded.last_scanned
+        """,
+        (
+            str(project_root),
+            project_root.name,
+            total_file_count,
+            total_line_count,
+            json.dumps(lang_dist),
+            json.dumps(dir_stats),
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "status": "ok",
+        "repo_id": repo_id,
+        "repo_root": str(project_root),
+        "repo_name": project_root.name,
+        "first_indexed_at": first_indexed_at,
+        "last_indexed_at": now,
+        "scanned_files": scanned,
+        "indexed_files": indexed,
+        "skipped_unchanged": skipped_unchanged,
+        "skipped_noncode_or_ignored": skipped_noncode,
+        "failed_files": failed,
+        "totals": {
+            "file_count": total_file_count,
+            "line_count": total_line_count,
+        },
+        "db_path": str(CODE_INDEX_DB),
+    }
+
+
 # ── Search helpers ────────────────────────────────────────────
 def run_text_search(
     query: str,
@@ -822,9 +2129,17 @@ async def index_scan(
     run_image: bool = True,
     run_video: bool = True,
     run_audio: bool = True,
+    run_code:  bool = False,
+    code_path: str | None = None,
 ):
     """Fire-and-forget scan. Acquires embed context so it queues
     correctly behind any active LLM call."""
+    if run_code and code_path:
+        code_root = Path(code_path).expanduser().resolve()
+        if not code_root.exists() or not code_root.is_dir():
+            raise HTTPException(404, "code_path directory not found")
+        if not _is_path_allowed(code_root):
+            raise HTTPException(403, "code_path not allowed")
 
     async def _do_scans():
         async with rm.embed_context():
@@ -835,6 +2150,7 @@ async def index_scan(
             if run_image: jobs.append(("image", loop.run_in_executor(pool, scan_image_index)))
             if run_video: jobs.append(("video", loop.run_in_executor(pool, scan_video_index_wrapper)))
             if run_audio: jobs.append(("audio", loop.run_in_executor(pool, scan_audio_index_wrapper)))
+            if run_code:  jobs.append(("code",  loop.run_in_executor(pool, lambda: scan_code_index_wrapper(code_path))))
             for name, fut in jobs:
                 try:
                     print(f"scan [{name}]:", await fut)
@@ -844,9 +2160,631 @@ async def index_scan(
     asyncio.ensure_future(_do_scans())
     submitted = [n for n, f in [
         ("text", run_text), ("image", run_image),
-        ("video", run_video), ("audio", run_audio)
+        ("video", run_video), ("audio", run_audio),
+        ("code", run_code),
     ] if f]
     return {"status": "accepted", "jobs": submitted}
+
+
+@app.post("/index/code/analyze")
+def index_code_analyze(
+    path: str = Query("."),
+    threshold: int = Query(40, ge=0, le=100),
+    max_scan_files: int = Query(5000, ge=100, le=20000),
+):
+    root = Path(path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+
+    result = analyze_code_directory(root, threshold=threshold, max_scan_files=max_scan_files)
+    storage_dir = ROOT / "storage"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    report_path = storage_dir / "code_index_analysis_latest.json"
+    report_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    result["report_path"] = str(report_path)
+    return result
+
+
+@app.post("/index/code/layer1/build")
+def index_code_layer1_build(
+    path: str = Query("."),
+    force: bool = Query(False),
+    max_files: int = Query(20000, ge=100, le=500000),
+):
+    root = Path(path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+    return build_code_layer1_index(root, force=force, max_files=max_files)
+
+
+def _resolve_repo_id_for_path(conn: sqlite3.Connection, path: Path) -> tuple[int, Path]:
+    analysis = analyze_code_directory(path)
+    if not analysis.get("ok"):
+        raise HTTPException(400, analysis.get("error", "Unable to analyze directory"))
+    repo_root = Path(str(analysis["project_root"])).resolve()
+    row = conn.execute("SELECT id FROM repositories WHERE root_path=?", (str(repo_root),)).fetchone()
+    if not row:
+        raise HTTPException(404, "Repository not indexed in Layer 1 DB")
+    return int(row["id"]), repo_root
+
+
+def _fetch_layer1_payload(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    repo_root: Path,
+    include_all: bool,
+    files_limit: int,
+    symbols_limit: int,
+) -> dict[str, Any]:
+    repo = conn.execute("SELECT * FROM repositories WHERE id=?", (repo_id,)).fetchone()
+    if not repo:
+        raise HTTPException(404, "Repository not indexed in Layer 1 DB")
+
+    lang_rows = conn.execute(
+        "SELECT language, COUNT(*) AS c FROM files WHERE repo_id=? GROUP BY language ORDER BY c DESC",
+        (repo_id,),
+    ).fetchall()
+    symbol_count = int(conn.execute("SELECT COUNT(*) FROM symbols WHERE repo_id=?", (repo_id,)).fetchone()[0])
+
+    files_query_limit = 1_000_000 if include_all else files_limit
+    symbols_query_limit = 1_000_000 if include_all else symbols_limit
+
+    file_rows = conn.execute(
+        """
+        SELECT id, rel_path, extension, language, line_count, mtime, last_indexed_at, module_docstring,
+               external_imports_json, internal_imports_json
+        FROM files
+        WHERE repo_id=?
+        ORDER BY rel_path
+        LIMIT ?
+        """,
+        (repo_id, files_query_limit),
+    ).fetchall()
+    symbol_rows = conn.execute(
+        """
+        SELECT s.symbol_name, s.symbol_type, s.signature, s.docstring, s.start_line, s.end_line,
+               s.is_public, f.rel_path
+        FROM symbols s
+        JOIN files f ON f.id = s.file_id
+        WHERE s.repo_id=?
+        ORDER BY s.symbol_name, f.rel_path
+        LIMIT ?
+        """,
+        (repo_id, symbols_query_limit),
+    ).fetchall()
+
+    files = [
+        {
+            "file_id": int(r["id"]),
+            "rel_path": r["rel_path"],
+            "extension": r["extension"],
+            "language": r["language"],
+            "line_count": int(r["line_count"] or 0),
+            "mtime": float(r["mtime"]),
+            "last_indexed_at": r["last_indexed_at"],
+            "module_docstring": r["module_docstring"],
+            "external_imports": json.loads(r["external_imports_json"] or "[]"),
+            "internal_imports": json.loads(r["internal_imports_json"] or "[]"),
+        }
+        for r in file_rows
+    ]
+    symbols = [
+        {
+            "name": r["symbol_name"],
+            "type": r["symbol_type"],
+            "signature": r["signature"],
+            "docstring": r["docstring"],
+            "start_line": int(r["start_line"] or 0),
+            "end_line": int(r["end_line"] or 0),
+            "is_public": bool(int(r["is_public"] or 0)),
+            "rel_path": r["rel_path"],
+        }
+        for r in symbol_rows
+    ]
+
+    return {
+        "repo": {
+            "repo_id": repo_id,
+            "repo_root": str(repo_root),
+            "repo_name": repo["repo_name"],
+            "first_indexed_at": repo["first_indexed_at"],
+            "last_indexed_at": repo["last_indexed_at"],
+            "total_file_count": int(repo["total_file_count"]),
+            "total_line_count": int(repo["total_line_count"]),
+            "total_symbol_count": symbol_count,
+            "language_distribution": {str(r["language"] or "unknown"): int(r["c"]) for r in lang_rows},
+            "directory_stats": json.loads(repo["directory_stats_json"] or "{}"),
+        },
+        "files": files,
+        "symbols": symbols,
+        "truncated": {
+            "files": (not include_all) and (len(files) >= files_limit),
+            "symbols": (not include_all) and (len(symbols) >= symbols_limit),
+        },
+    }
+
+
+@app.get("/index/code/layer1/repo")
+def index_code_layer1_repo(path: str = Query(".")):
+    root = Path(path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+    _init_code_index_db()
+    conn = _code_db_conn()
+    repo_id, repo_root = _resolve_repo_id_for_path(conn, root)
+    repo = conn.execute("SELECT * FROM repositories WHERE id=?", (repo_id,)).fetchone()
+    lang_rows = conn.execute(
+        "SELECT language, COUNT(*) AS c FROM files WHERE repo_id=? GROUP BY language ORDER BY c DESC",
+        (repo_id,),
+    ).fetchall()
+    symbol_count = int(conn.execute("SELECT COUNT(*) FROM symbols WHERE repo_id=?", (repo_id,)).fetchone()[0])
+    conn.close()
+    return {
+        "repo_id": repo_id,
+        "repo_root": str(repo_root),
+        "repo_name": repo["repo_name"],
+        "first_indexed_at": repo["first_indexed_at"],
+        "last_indexed_at": repo["last_indexed_at"],
+        "total_file_count": int(repo["total_file_count"]),
+        "total_line_count": int(repo["total_line_count"]),
+        "total_symbol_count": symbol_count,
+        "language_distribution": {str(r["language"] or "unknown"): int(r["c"]) for r in lang_rows},
+        "directory_stats": json.loads(repo["directory_stats_json"] or "{}"),
+        "db_path": str(CODE_INDEX_DB),
+    }
+
+
+@app.get("/index/code/layer1/files")
+def index_code_layer1_files(
+    path: str = Query("."),
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    root = Path(path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+    _init_code_index_db()
+    conn = _code_db_conn()
+    repo_id, repo_root = _resolve_repo_id_for_path(conn, root)
+    rows = conn.execute(
+        """
+        SELECT id, rel_path, extension, language, line_count, mtime, last_indexed_at, module_docstring,
+               external_imports_json, internal_imports_json
+        FROM files
+        WHERE repo_id=?
+        ORDER BY rel_path
+        LIMIT ? OFFSET ?
+        """,
+        (repo_id, limit, offset),
+    ).fetchall()
+    conn.close()
+    files = []
+    for r in rows:
+        files.append(
+            {
+                "file_id": int(r["id"]),
+                "rel_path": r["rel_path"],
+                "extension": r["extension"],
+                "language": r["language"],
+                "line_count": int(r["line_count"] or 0),
+                "mtime": float(r["mtime"]),
+                "last_indexed_at": r["last_indexed_at"],
+                "module_docstring": r["module_docstring"],
+                "external_imports": json.loads(r["external_imports_json"] or "[]"),
+                "internal_imports": json.loads(r["internal_imports_json"] or "[]"),
+            }
+        )
+    return {
+        "repo_id": repo_id,
+        "repo_root": str(repo_root),
+        "count": len(files),
+        "limit": limit,
+        "offset": offset,
+        "files": files,
+    }
+
+
+@app.get("/index/code/layer1/symbols")
+def index_code_layer1_symbols(
+    path: str = Query("."),
+    q: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+):
+    root = Path(path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+    _init_code_index_db()
+    conn = _code_db_conn()
+    repo_id, repo_root = _resolve_repo_id_for_path(conn, root)
+    if q and q.strip():
+        rows = conn.execute(
+            """
+            SELECT s.symbol_name, s.symbol_type, s.signature, s.docstring, s.start_line, s.end_line,
+                   s.is_public, f.rel_path
+            FROM symbols s
+            JOIN files f ON f.id = s.file_id
+            WHERE s.repo_id=? AND LOWER(s.symbol_name) LIKE ?
+            ORDER BY s.symbol_name, f.rel_path
+            LIMIT ? OFFSET ?
+            """,
+            (repo_id, f"%{q.strip().lower()}%", limit, offset),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT s.symbol_name, s.symbol_type, s.signature, s.docstring, s.start_line, s.end_line,
+                   s.is_public, f.rel_path
+            FROM symbols s
+            JOIN files f ON f.id = s.file_id
+            WHERE s.repo_id=?
+            ORDER BY s.symbol_name, f.rel_path
+            LIMIT ? OFFSET ?
+            """,
+            (repo_id, limit, offset),
+        ).fetchall()
+    conn.close()
+    symbols = []
+    for r in rows:
+        symbols.append(
+            {
+                "name": r["symbol_name"],
+                "type": r["symbol_type"],
+                "signature": r["signature"],
+                "docstring": r["docstring"],
+                "start_line": int(r["start_line"] or 0),
+                "end_line": int(r["end_line"] or 0),
+                "is_public": bool(int(r["is_public"] or 0)),
+                "rel_path": r["rel_path"],
+            }
+        )
+    return {
+        "repo_id": repo_id,
+        "repo_root": str(repo_root),
+        "count": len(symbols),
+        "limit": limit,
+        "offset": offset,
+        "query": q,
+        "symbols": symbols,
+    }
+
+
+@app.get("/index/code/context")
+def index_code_context(
+    path: str = Query("."),
+    force_reindex: bool = Query(False),
+    include_all: bool = Query(True),
+    files_limit: int = Query(500, ge=1, le=20000),
+    symbols_limit: int = Query(2000, ge=1, le=100000),
+    threshold: int = Query(40, ge=0, le=100),
+    max_scan_files: int = Query(5000, ge=100, le=20000),
+):
+    """
+    Combined Layer 1 + Layer 2 payload for codebase-aware agents.
+    Returns:
+      - layer2_detection: project detection/classification signals
+      - layer1_index: repository/file/symbol facts from SQLite
+    """
+    root = Path(path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+
+    layer2 = analyze_code_directory(root, threshold=threshold, max_scan_files=max_scan_files)
+    if not layer2.get("ok"):
+        raise HTTPException(500, layer2.get("error", "code analysis failed"))
+
+    build_result = None
+    if force_reindex:
+        build_result = build_code_layer1_index(root, force=True, max_files=200000)
+        if build_result.get("status") not in {"ok", "skipped_not_code_directory"}:
+            raise HTTPException(500, str(build_result))
+    else:
+        # Ensure layer1 exists at least once.
+        _init_code_index_db()
+        conn = _code_db_conn()
+        try:
+            _resolve_repo_id_for_path(conn, root)
+        except HTTPException:
+            build_result = build_code_layer1_index(root, force=False, max_files=200000)
+            if build_result.get("status") not in {"ok", "skipped_not_code_directory"}:
+                conn.close()
+                raise HTTPException(500, str(build_result))
+        finally:
+            conn.close()
+
+    _init_code_index_db()
+    conn = _code_db_conn()
+    repo_id, repo_root = _resolve_repo_id_for_path(conn, root)
+    layer1 = _fetch_layer1_payload(
+        conn=conn,
+        repo_id=repo_id,
+        repo_root=repo_root,
+        include_all=include_all,
+        files_limit=files_limit,
+        symbols_limit=symbols_limit,
+    )
+    conn.close()
+
+    return {
+        "ok": True,
+        "input_path": str(root),
+        "layer2_detection": layer2,
+        "layer1_index": layer1,
+        "build_result": build_result,
+        "db_path": str(CODE_INDEX_DB),
+    }
+
+
+def _recent_changes_payload(repo_root: Path, recent_days: int = 7, limit: int = 20) -> dict[str, Any]:
+    _init_code_index_db()
+    conn = _code_db_conn()
+    cutoff_ts = time.time() - (max(1, recent_days) * 86400)
+    rows = conn.execute(
+        """
+        SELECT relative_path, last_modified, line_count
+        FROM project_files
+        WHERE repo_path=? AND last_modified>=?
+        ORDER BY last_modified DESC
+        LIMIT ?
+        """,
+        (str(repo_root), float(cutoff_ts), int(limit)),
+    ).fetchall()
+    conn.close()
+
+    files = [
+        {
+            "relative_path": r["relative_path"],
+            "last_modified": float(r["last_modified"]),
+            "line_count": int(r["line_count"] or 0),
+        }
+        for r in rows
+    ]
+
+    commits: list[dict[str, Any]] = []
+    if (repo_root / ".git").exists():
+        try:
+            out = subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(repo_root),
+                    "log",
+                    "--since",
+                    f"{max(1, recent_days)} days ago",
+                    "--pretty=format:%H|%ct|%s",
+                    "-n",
+                    str(int(limit)),
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            for line in out.splitlines():
+                parts = line.split("|", 2)
+                if len(parts) == 3:
+                    commits.append(
+                        {
+                            "commit": parts[0],
+                            "timestamp": int(parts[1]),
+                            "message": parts[2],
+                        }
+                    )
+        except Exception:
+            pass
+    return {"files": files, "commits": commits}
+
+
+@app.get("/index/code/get_codebase_index")
+def get_codebase_index_api(
+    path: str = Query("."),
+    recent_days: int = Query(7, ge=1, le=90),
+    recent_limit: int = Query(20, ge=1, le=100),
+    symbol_limit: int = Query(1200, ge=1, le=10000),
+    force_reindex: bool = Query(False),
+):
+    root = Path(path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+
+    if force_reindex:
+        built = build_code_layer1_index(root, force=True, max_files=200000)
+        if built.get("status") not in {"ok", "skipped_not_code_directory"}:
+            raise HTTPException(500, str(built))
+
+    layer2 = analyze_code_directory(root)
+    _init_code_index_db()
+    conn = _code_db_conn()
+    repo_id, repo_root = _resolve_repo_id_for_path(conn, root)
+    layer1 = _fetch_layer1_payload(
+        conn=conn,
+        repo_id=repo_id,
+        repo_root=repo_root,
+        include_all=False,
+        files_limit=300,
+        symbols_limit=max(1, symbol_limit),
+    )
+    ext_rows = conn.execute(
+        """
+        SELECT package_name, version, dependency_type, source_file
+        FROM external_dependencies
+        WHERE repo_path=?
+        ORDER BY package_name
+        """,
+        (str(repo_root),),
+    ).fetchall()
+    pf_rows = conn.execute(
+        """
+        SELECT relative_path, is_entry_point, is_test_file
+        FROM project_files
+        WHERE repo_path=?
+        ORDER BY relative_path
+        LIMIT 5000
+        """,
+        (str(repo_root),),
+    ).fetchall()
+    conn.close()
+
+    symbols_index = [
+        {
+            "name": s["name"],
+            "type": s["type"],
+            "path": s["rel_path"],
+            "line": s["start_line"],
+        }
+        for s in layer1["symbols"]
+        if bool(s.get("is_public", True))
+    ]
+    external_deps = [
+        {
+            "package_name": r["package_name"],
+            "version": r["version"],
+            "dependency_type": r["dependency_type"],
+            "source_file": r["source_file"],
+        }
+        for r in ext_rows
+    ]
+    recent = _recent_changes_payload(repo_root, recent_days=recent_days, limit=recent_limit)
+    structure = {
+        "file_count": layer1["repo"]["total_file_count"],
+        "line_count": layer1["repo"]["total_line_count"],
+        "languages": layer1["repo"]["language_distribution"],
+        "directories": layer1["repo"]["directory_stats"],
+        "entry_points": [r["relative_path"] for r in pf_rows if int(r["is_entry_point"] or 0) == 1][:100],
+        "test_file_count": sum(1 for r in pf_rows if int(r["is_test_file"] or 0) == 1),
+    }
+
+    return {
+        "ok": True,
+        "repo_path": str(repo_root),
+        "layer2_project_detection": layer2,
+        "structure": structure,
+        "symbols_index": symbols_index,
+        "external_dependencies": external_deps,
+        "recent_changes": recent,
+        "db_path": str(CODE_INDEX_DB),
+    }
+
+
+@app.post("/index/code/get_module_detail")
+def get_module_detail_api(
+    repo_path: str = Body(..., embed=True),
+    paths: list[str] = Body(..., embed=True),
+):
+    root = Path(repo_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+    _init_code_index_db()
+    conn = _code_db_conn()
+    _repo_id, repo_root = _resolve_repo_id_for_path(conn, root)
+
+    modules = []
+    for rel in paths:
+        rel_clean = str(rel).replace("\\", "/").lstrip("./")
+        file_row = conn.execute(
+            """
+            SELECT file_path, relative_path, extension, line_count, is_entry_point, is_test_file, is_config_file
+            FROM project_files
+            WHERE repo_path=? AND relative_path=?
+            """,
+            (str(repo_root), rel_clean),
+        ).fetchone()
+        if not file_row:
+            continue
+        sym_rows = conn.execute(
+            """
+            SELECT symbol_name, symbol_type, signature, docstring_brief, line_start, line_end, is_public, language
+            FROM code_symbols
+            WHERE repo_path=? AND relative_path=?
+            ORDER BY line_start
+            """,
+            (str(repo_root), rel_clean),
+        ).fetchall()
+        imports_row = conn.execute(
+            "SELECT external_imports_json, internal_imports_json, module_docstring FROM files WHERE abs_path=?",
+            (file_row["file_path"],),
+        ).fetchone()
+        modules.append(
+            {
+                "relative_path": file_row["relative_path"],
+                "extension": file_row["extension"],
+                "line_count": int(file_row["line_count"] or 0),
+                "is_entry_point": bool(int(file_row["is_entry_point"] or 0)),
+                "is_test_file": bool(int(file_row["is_test_file"] or 0)),
+                "is_config_file": bool(int(file_row["is_config_file"] or 0)),
+                "module_docstring": imports_row["module_docstring"] if imports_row else None,
+                "imports": {
+                    "external": json.loads(imports_row["external_imports_json"] or "[]") if imports_row else [],
+                    "internal": json.loads(imports_row["internal_imports_json"] or "[]") if imports_row else [],
+                },
+                "symbols": [
+                    {
+                        "name": s["symbol_name"],
+                        "type": s["symbol_type"],
+                        "signature": s["signature"],
+                        "docstring_brief": s["docstring_brief"],
+                        "line_start": int(s["line_start"] or 0),
+                        "line_end": int(s["line_end"] or 0),
+                        "is_public": bool(int(s["is_public"] or 0)),
+                        "language": s["language"],
+                    }
+                    for s in sym_rows
+                ],
+            }
+        )
+    conn.close()
+    return {"ok": True, "repo_path": str(repo_root), "count": len(modules), "modules": modules}
+
+
+@app.get("/index/code/get_file_content")
+def get_file_content_api(
+    repo_path: str = Query(...),
+    path: str = Query(...),
+    start_line: int = Query(1, ge=1),
+    end_line: int | None = Query(None, ge=1),
+):
+    root = Path(repo_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+
+    rel = str(path).replace("\\", "/").lstrip("./")
+    abs_path = (root / rel).resolve()
+    if not abs_path.exists() or not abs_path.is_file():
+        raise HTTPException(404, "File not found")
+    if not _is_path_allowed(abs_path):
+        raise HTTPException(403, "Path not allowed")
+
+    text = _safe_read_text(abs_path)
+    lines = text.splitlines()
+    start = max(1, int(start_line))
+    end = int(end_line) if end_line is not None else len(lines)
+    end = max(start, min(end, len(lines)))
+    snippet = "\n".join(lines[start - 1 : end])
+    return {
+        "ok": True,
+        "repo_path": str(root),
+        "relative_path": rel,
+        "start_line": start,
+        "end_line": end,
+        "total_lines": len(lines),
+        "content": snippet,
+    }
 
 
 # ── /image/index/status ───────────────────────────────────────
