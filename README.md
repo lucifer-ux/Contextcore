@@ -1,321 +1,552 @@
-# 🧠 ContextCore
+# ContextCore
 
-> **The intelligent context layer between your AI and the world.**  
-> Stop paying for noise. Let Claude see only what matters.
+ContextCore is a local CLI + backend + MCP integration layer for searching text, images, audio, and video from AI tools such as Claude Desktop.
 
----
+This README is intentionally focused on:
+- how to install it
+- how to run it
+- how to connect it to Claude
+- how to verify that indexing and search are working
+- how to troubleshoot common failures
 
-## The Problem
+It does not try to explain the internal code architecture.
 
-When Claude uses multiple MCP tools — Slack, Notion, Gmail, Jira — every tool dumps its **full raw output** into the context window. Claude sees thousands of tokens of noise to find a handful of relevant sentences.
+## What ContextCore Does
 
-**You pay for all of it.**
+ContextCore gives you:
+- a CLI command: `contextcore`
+- a local backend server, normally on `http://127.0.0.1:8000`
+- an MCP server script for Claude and similar tools
+- local indexing for:
+  - text and documents
+  - images
+  - audio transcripts
+  - video embeddings and video context
 
----
+## Recommended Setup
 
-## The Solution
+For real usage, the most reliable setup is:
+- keep one dedicated Python virtual environment
+- use that same Python environment for:
+  - `contextcore init`
+  - `contextcore serve`
+  - `mcp_server.py` in your Claude config
 
-ContextCore sits between Claude and your data sources. It:
+Do not test the backend in one venv and point Claude at a different venv. That is one of the most common causes of "it works in the terminal but not in Claude".
 
-1. **Intercepts** all MCP tool calls
-2. **Indexes** results using BM25 + SQLite FTS5 (text) and CLIP (images/video)
-3. **Reranks** candidates by semantic similarity to the query
-4. **Returns only the top 3–5 relevant chunks** to Claude
+## Prerequisites
 
-One SDK. One MCP tool for Claude to call. 20–30x fewer tokens.
+You need:
+- Python 3.10+
+- Windows, macOS, or Linux
+- internet access for first-time model downloads
+- enough disk space for Python packages and model files
 
+Optional but important:
+- `ffmpeg` for video indexing
+- Claude Desktop or another MCP-capable tool if you want interactive AI integration
+
+## Install From Source
+
+### Windows
+
+```powershell
+cd C:\path\to\SearchEmbedSDK
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
 ```
-Before ContextCore:   User → Claude → [Slack MCP + Notion MCP + Gmail MCP] → 8,000 tokens → Claude
-After ContextCore:    User → Claude → [ContextCore] → 300 tokens → Claude
-```
 
----
-
-## Features
-
-- 🔍 **Hybrid search** — BM25 keyword + semantic vector reranking
-- 🖼️ **Multimodal** — text, images, video (via CLIP embeddings)
-- 🪶 **Lightweight** — runs fully local on a laptop, zero infrastructure
-- 🔌 **MCP native** — drop-in tool for Claude Desktop or any MCP host
-- 🌐 **Language agnostic** — Python core, REST API for any language
-- ☁️ **Cloud optional** — use local models or OpenAI/Anthropic embeddings
-- 💾 **Single file storage** — everything in one portable SQLite database
-
----
-
-## Quick Start
-
-### Install
+### macOS / Linux
 
 ```bash
-pip install contextcore
+cd /path/to/SearchEmbedSDK
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
 ```
 
-### Index your files
+## Verify Install
 
-```python
-from contextcore import ContextCore
+Run:
 
-cc = ContextCore()  # creates contextcore.db in current directory
-
-# Index anything — text, images, video
-cc.index("./docs")
-cc.index("./slack_export.json", source="slack")
-cc.index("./screenshots/", source="images")
+```powershell
+contextcore --help
 ```
 
-### Query
+If that fails, the venv is either not activated or the editable install did not complete.
 
-```python
-results = cc.search("budget discussion from last quarter", top_k=5)
+## First-Time Setup
 
-for r in results:
-    print(r.content)
-    print(r.source, r.score)
+Run:
+
+```powershell
+contextcore init
 ```
 
-That's it. Three lines to multimodal semantic search.
+The setup wizard walks through:
+- directory to watch
+- modalities to enable
+- storage location
+- optional MCP registration
+- backend startup
+- initial indexing
 
----
+### Recommended choices
 
-## Claude Desktop Integration (MCP)
+If you want full multimodal support, enable:
+- `text`
+- `image`
+- `audio`
+- `video`
 
-ContextCore ships as a ready-to-use MCP server. Claude calls it as a single tool and never touches raw MCP output directly.
+If you only want to test quickly, point it to a small folder with a few known files.
 
-### 1. Start the MCP server
+## What `contextcore init` Does
 
-```bash
-contextcore serve --db ./mydata.db --port 8080
+Depending on what you select, `contextcore init` may:
+- write `~/.contextcore/contextcore.yaml`
+- install heavy Python dependencies
+- install or detect `ffmpeg`
+- prewarm CLIP and Whisper models
+- start the backend server
+- start the initial indexing scan
+- optionally update MCP tool configs
+
+## Daily Commands
+
+### Show status
+
+```powershell
+contextcore status
 ```
 
-### 2. Add to Claude Desktop config
+This shows:
+- whether the backend server is running
+- whether the MCP server script is present
+- counts for text, images, audio, and video
+- whether video runtime dependencies are available
+
+### Run indexing again
+
+```powershell
+contextcore index
+```
+
+Or for a specific folder:
+
+```powershell
+contextcore index "C:\Users\USER\Documents\test"
+```
+
+### Start backend manually
+
+```powershell
+contextcore serve
+```
+
+By default, ContextCore uses port `8000`.
+
+### Diagnose setup problems
+
+```powershell
+contextcore doctor
+```
+
+### Register with a tool later
+
+```powershell
+contextcore register claude-desktop
+contextcore register claude-code
+contextcore register cursor
+contextcore register cline
+```
+
+### Install optional model stacks manually
+
+```powershell
+contextcore install clip
+contextcore install audio
+contextcore install all
+```
+
+## Expected Status Output
+
+A healthy setup usually looks like:
+
+```text
+Server
+------------------------------------------------------------------------------
+  [OK] Running on port 8000
+  [OK] MCP server script found
+
+Index Progress
+------------------------------------------------------------------------------
+  Text     > 0   ready
+  Images   > 0   ready
+  Audio    > 0   ready
+  Video    > 0   ready
+```
+
+If `Video` shows `missing ffmpeg`, video indexing is not ready.
+
+If `Video` shows `model unavailable`, the CLIP model is not ready in the active environment.
+
+## Claude Desktop Setup
+
+Use the same Python executable that you used for the CLI and backend.
+
+Example Claude MCP config:
 
 ```json
 {
   "mcpServers": {
     "contextcore": {
-      "command": "contextcore",
-      "args": ["serve", "--db", "./mydata.db"],
-      "env": {}
+      "command": "C:\\Users\\USER\\Documents\\SDKSearchImplementation\\SearchEmbedSDK\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\Users\\USER\\Documents\\SDKSearchImplementation\\SearchEmbedSDK\\mcp_server.py"
+      ],
+      "cwd": "C:\\Users\\USER\\Documents\\SDKSearchImplementation\\SearchEmbedSDK",
+      "env": {
+        "CONTEXTCORE_API_BASE_URL": "http://127.0.0.1:8000",
+        "CONTEXTCORE_MCP_TIMEOUT_SECONDS": "120"
+      }
     }
   }
 }
 ```
 
-### 3. That's it
+Important:
+- `command` should point to the Python inside the venv you are actively using
+- `args` should point to this repo's `mcp_server.py`
+- `cwd` should be the repo root
+- `CONTEXTCORE_API_BASE_URL` should match the backend server port
 
-Claude now has one tool: `contextcore_search`. When it calls it, ContextCore internally fans out to your other MCPs, filters the results, and returns only what's relevant.
+After changing Claude config:
+- fully quit Claude Desktop
+- start the backend if it is not already running
+- reopen Claude Desktop
 
+## Backend Health Check
+
+You can verify the backend directly:
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/health
 ```
-Claude → contextcore_search("Q3 budget issues")
-       ↓
-       ContextCore fans out to Slack, Notion, Gmail MCPs
-       ↓
-       Raw results: ~6,000 tokens
-       ↓
-       After filtering and reranking: ~280 tokens
-       ↓
-Claude receives clean, relevant context only
+
+If the backend is healthy, you should get a successful response.
+
+## Reset and Re-Test From Scratch
+
+If you want to test like a fresh user, remove the venv and recreate it.
+
+### Windows
+
+```powershell
+deactivate 2>$null
+
+Get-CimInstance Win32_Process | Where-Object {
+  $_.ExecutablePath -like 'C:\path\to\SearchEmbedSDK\.venv*'
+} | Select-Object ProcessId, ExecutablePath, CommandLine
+
+Stop-Process -Id <PID> -Force
+
+Remove-Item -Recurse -Force C:\path\to\SearchEmbedSDK\.venv
 ```
 
----
+Then reinstall:
 
-## REST API (Any Language)
+```powershell
+cd C:\path\to\SearchEmbedSDK
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
+```
 
-If your codebase isn't Python, run ContextCore as a local service and call it over HTTP.
+Then rerun:
 
-### Start the server
+```powershell
+contextcore init
+```
+
+## Troubleshooting
+
+### 1. `contextcore` command not found
+
+Cause:
+- venv not activated
+- editable install not run
+
+Fix:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+```
+
+### 2. `contextcore init` fails on import errors
+
+Cause:
+- dependencies were not installed into the active venv
+- wrong Python interpreter is being used
+
+Fix:
+
+```powershell
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
+```
+
+Then verify:
+
+```powershell
+python -c "import questionary, typer, fastapi; print('ok')"
+```
+
+### 3. Server is healthy, but Claude says ContextCore is unavailable
+
+Cause:
+- Claude is using a different Python environment than the backend
+- Claude config points at the wrong `python.exe`
+- `cwd` is missing or wrong
+
+Fix:
+- use the same venv in both places
+- update Claude config `command`
+- add `cwd`
+- restart Claude Desktop fully
+
+### 4. Video says `missing ffmpeg`
+
+Cause:
+- `ffmpeg` is not installed
+- `ffmpeg` exists but is not resolvable in the active runtime
+
+Check:
+
+```powershell
+where.exe ffmpeg
+ffmpeg -version
+```
+
+If not found:
+- Windows: install via `winget`
+- macOS: install via `brew`
+- Linux: install via package manager
+
+Examples:
+
+```powershell
+winget install Gyan.FFmpeg
+```
 
 ```bash
-contextcore serve --db ./mydata.db --port 8080
+brew install ffmpeg
+sudo apt install ffmpeg
 ```
 
-### Call from JavaScript
+Then rerun:
 
-```javascript
-const response = await fetch("http://localhost:8080/search", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    query: "deployment issues last week",
-    top_k: 5
-  })
-});
-
-const { results } = await response.json();
+```powershell
+contextcore init
 ```
 
-### Call from Go
+or:
 
-```go
-body := `{"query": "deployment issues last week", "top_k": 5}`
-resp, _ := http.Post("http://localhost:8080/search", "application/json", strings.NewReader(body))
+```powershell
+contextcore install all
 ```
 
-### Call from Ruby
+### 5. Video says `model unavailable`
 
-```ruby
-require 'net/http'
-require 'json'
+Cause:
+- CLIP dependencies are installed but model files are not ready
+- the wrong venv is being used
 
-uri = URI('http://localhost:8080/search')
-response = Net::HTTP.post(uri, { query: "deployment issues", top_k: 5 }.to_json, "Content-Type" => "application/json")
-results = JSON.parse(response.body)
+Fix:
+
+```powershell
+contextcore install clip
 ```
 
----
+Then recheck:
 
-## Indexing Data Sources
-
-### Local files
-
-```python
-cc.index("./documents/")           # recursively indexes all files
-cc.index("./report.pdf")           # single file
-cc.index("./images/")              # images via CLIP
-cc.index("./recordings/")          # video keyframe extraction + CLIP
+```powershell
+contextcore status
 ```
 
-### Slack export
+### 6. Audio is not indexing
 
-```python
-cc.index("./slack_export.json", source="slack")
+Cause:
+- Whisper is missing
+- wrong venv
+- unsupported or unreadable audio file
+
+Fix:
+
+```powershell
+contextcore install audio
+contextcore index
 ```
 
-### From an MCP result (runtime indexing)
+### 7. Backend starts, but indexing results stay at zero
 
-```python
-# index MCP output on the fly so future queries skip the MCP call
-cc.index_mcp_result(tool_name="notion", result=raw_notion_output, query_context="Q3 planning")
+Check:
+- does the watched folder actually contain supported files?
+- does `contextcore.yaml` point to the folder you think it does?
+
+Your config usually lives at:
+
+```text
+C:\Users\USER\.contextcore\contextcore.yaml
 ```
 
-### Custom data
+Verify:
+- `organized_root`
+- `audio_directories`
+- `video_directories`
 
-```python
-cc.index_text(
-    content="Your raw text here",
-    metadata={"source": "internal-wiki", "date": "2025-11-01", "author": "alice"}
-)
+Then run:
+
+```powershell
+contextcore index
+contextcore status
 ```
 
----
+### 8. Port mismatch between backend and Claude
 
-## Configuration
+ContextCore should use port `8000` unless you override it.
 
-```python
-from contextcore import ContextCore, Config
+Check backend:
 
-cc = ContextCore(config=Config(
-    db_path="./contextcore.db",
-
-    # Embedding model — local by default
-    embedding_model="clip-vit-base-patch32",     # local, ~300MB
-    # embedding_model="openai/text-embedding-3-small",  # cloud option
-
-    # Search tuning
-    bm25_candidates=100,    # how many FTS5 results to pull before reranking
-    top_k_default=5,        # final results returned to caller
-
-    # Chunking
-    chunk_size=400,         # tokens per chunk
-    chunk_overlap=50,
-
-    # Cache
-    mcp_cache_ttl_seconds=3600,  # 1 hour — serve from index, skip live MCP call
-))
+```powershell
+contextcore status
 ```
 
----
+Check Claude config:
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│                   ContextCore                    │
-│                                                  │
-│  ┌──────────┐    ┌──────────┐    ┌────────────┐ │
-│  │  Ingest  │───▶│  Chunk   │───▶│   Index    │ │
-│  │  Layer   │    │  Engine  │    │  (SQLite)  │ │
-│  └──────────┘    └──────────┘    └─────┬──────┘ │
-│                                        │        │
-│  ┌──────────┐    ┌──────────┐    ┌─────▼──────┐ │
-│  │  Results │◀───│ Reranker │◀───│ BM25+CLIP  │ │
-│  │   API    │    │(semantic)│    │   Search   │ │
-│  └──────────┘    └──────────┘    └────────────┘ │
-└─────────────────────────────────────────────────┘
-         ▲                    ▲
-    MCP Server           REST API
-  (Claude Desktop)    (Any language)
+```json
+"CONTEXTCORE_API_BASE_URL": "http://127.0.0.1:8000"
 ```
 
-**Storage**: Everything lives in a single `.db` file — FTS5 index, vector embeddings (sqlite-vec), chunk metadata, MCP cache, file registry.
+These must match.
 
-**Query flow**:
-1. FTS5 retrieves top 100 keyword candidates — milliseconds
-2. CLIP/embedding model reranks to top 5 by semantic similarity
-3. Parent chunks expanded for full context
-4. Results returned with source, score, and metadata
+### 9. Old background servers are still running
 
----
+Find them:
 
-## Supported File Types
-
-| Type | Format | Engine |
-|------|--------|--------|
-| Text | `.txt`, `.md`, `.pdf`, `.docx` | BM25 + FTS5 |
-| Code | `.py`, `.js`, `.ts`, `.go`, etc. | BM25 + FTS5 |
-| Data | `.json`, `.csv` | BM25 + FTS5 |
-| Images | `.jpg`, `.png`, `.webp` | CLIP |
-| Video | `.mp4`, `.mov` (keyframes) | CLIP |
-| Slack | export `.json` | BM25 + FTS5 |
-
----
-
-## Cost Savings
-
-A rough estimate for a team using Claude with 5 MCPs:
-
-| | Without ContextCore | With ContextCore |
-|---|---|---|
-| Avg context per query | ~8,000 tokens | ~350 tokens |
-| Queries per day | 500 | 500 |
-| Monthly token cost | ~$400 | ~$18 |
-| **Savings** | | **~95%** |
-
-*Estimates based on Claude Sonnet pricing. Actual savings vary by use case.*
-
----
-
-## Roadmap
-
-- [ ] Automatic MCP discovery and proxying
-- [ ] Web dashboard with live token savings counter
-- [ ] Streaming results
-- [ ] Multi-user / team support
-- [ ] Managed cloud version (hosted indexing + sync)
-- [ ] Connectors: Notion, Linear, GitHub Issues, Google Drive
-
----
-
-## Contributing
-
-Contributions welcome. Open an issue first for major changes.
-
-```bash
-git clone https://github.com/yourname/contextcore
-cd contextcore
-pip install -e ".[dev]"
-pytest
+```powershell
+Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -match 'uvicorn unimain:app|mcp_server.py'
+} | Select-Object ProcessId, ExecutablePath, CommandLine
 ```
 
----
+Stop them:
 
-## License
+```powershell
+Stop-Process -Id <PID> -Force
+```
 
-MIT — free to use, self-host, and build on.
+Then start cleanly:
 
----
+```powershell
+contextcore serve
+```
 
-<p align="center">
-  Built for teams tired of paying Claude to read noise.
-</p>
+### 10. Git or IDE shows huge numbers of changes
+
+Cause:
+- virtual environments inside the workspace
+- caches
+- logs
+- local config files
+
+Do not create test venvs inside broad workspace roots unless they are ignored.
+
+The repo already ignores common noise such as:
+- `.venv/`
+- `.venv-test/`
+- storage DBs
+- `__pycache__`
+- logs
+
+If your IDE still shows thousands of changes:
+- refresh Source Control
+- reload the IDE window
+- verify your IDE workspace is rooted at the repo you actually want
+
+## Recommended End-to-End Test
+
+1. Create or activate the repo-local `.venv`
+2. Install:
+
+```powershell
+pip install -r requirements.txt
+pip install -e .
+```
+
+3. Run:
+
+```powershell
+contextcore init
+```
+
+4. Point it at a folder with known sample files
+5. Enable all modalities
+6. Check:
+
+```powershell
+contextcore status
+```
+
+7. Confirm backend:
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/health
+```
+
+8. Confirm Claude config uses the same venv
+9. Restart Claude Desktop
+10. Test search from Claude
+
+## Files You Will Commonly Use
+
+- repo config loader:
+  - `config.py`
+- backend entry:
+  - `unimain.py`
+- MCP bridge:
+  - `mcp_server.py`
+- user config:
+  - `~/.contextcore/contextcore.yaml`
+
+## If You Need Help
+
+When diagnosing problems, the highest-signal commands are:
+
+```powershell
+contextcore status
+contextcore doctor
+where.exe ffmpeg
+Invoke-WebRequest http://127.0.0.1:8000/health
+```
+
+If something still fails, capture:
+- the exact command you ran
+- the full traceback or terminal output
+- your `contextcore status` output
+- the Python path used by Claude in your MCP config
+
+That is usually enough to isolate the issue quickly.

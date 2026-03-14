@@ -2,11 +2,13 @@ from pathlib import Path
 import subprocess
 from PIL import Image
 
-# --------------------------------------------------
-# Roots
-# --------------------------------------------------
-STORAGE_ROOT = Path("/mnt/storage")
-THUMB_ROOT = STORAGE_ROOT / "thumbnails"
+import sys
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+from config import get_organized_root
+
+STORAGE_ROOT = get_organized_root()
+THUMB_ROOT = STORAGE_ROOT / ".thumbnails"
 
 IMAGE_THUMB_DIR = THUMB_ROOT / "images"
 VIDEO_THUMB_DIR = THUMB_ROOT / "video"

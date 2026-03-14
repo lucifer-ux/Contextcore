@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "contextcore"
+version = "0.1.0"
+description = "Unified local search and indexing for Claude and other AI tools"
+requires-python = ">=3.10"
+
+# Lightweight base deps only — heavy ML libs are installed via 'contextcore install'
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "mcp[cli]",
+    "sqlite-vec",
+    "pypdf",
+    "typer",
+    "rich",
+    "questionary",
+    "watchdog",
+    "requests",
+    "numpy",
+    "Pillow",
+    "rapidfuzz",
+    "openpyxl",
+    "xlrd",
+    "odfpy",
+]
+
+[project.optional-dependencies]
+# Install these separately (large downloads)
+vision = ["torch", "torchvision", "transformers"]
+audio  = ["faster-whisper"]
+all    = ["torch", "torchvision", "transformers", "faster-whisper"]
+
+[project.scripts]
+# This is what makes 'contextcore' work as a global command
+contextcore = "cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cli*", "core*"]

@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from cli.constants import DEFAULT_BACKEND_URL, DEFAULT_PORT
+
 
 SUPPORTED_TOOLS = (
     "claude-desktop",
@@ -314,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tool", choices=SUPPORTED_TOOLS, help="Alternative to a specific flag")
     p.add_argument("--config", help="Override target config path (single-tool use)")
     p.add_argument("--server-name", default="contextcore", help="MCP server key name (mcp for OpenCode, mcpServers for others)")
-    p.add_argument("--backend-url", default="http://127.0.0.1:8000")
+    p.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
     p.add_argument("--timeout-seconds", type=int, default=120)
     p.add_argument("--dry-run", action="store_true")
     return p
@@ -349,7 +351,7 @@ def main() -> None:
 
     print(json.dumps({"ok": True, "results": results}, indent=2))
     print("\nNext steps:")
-    print("1) Keep backend running: uvicorn unimain:app --host 127.0.0.1 --port 8000")
+    print(f"1) Keep backend running: uvicorn unimain:app --host 127.0.0.1 --port {DEFAULT_PORT}")
     print("2) Restart the target client app so MCP config reloads.")
 
 

@@ -5,8 +5,13 @@ import time
 from pathlib import Path
 from threading import Lock
 
+import sys
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+from config import get_organized_root
+
 MAX_ITEMS = 5
-STATE_PATH = Path("/mnt/storage/.radxa_state/recent_sync.json")
+STATE_PATH = get_organized_root() / ".radxa_state" / "recent_sync.json"
 
 _lock = Lock()
 

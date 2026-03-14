@@ -49,30 +49,42 @@ def init_db():
 def upsert_file(path: str, filename: str, category: str, mtime: float, content: str):
     conn = get_conn()
     with conn:
-        # upsert metadata
-        cur = conn.execute(
+        row = conn.execute(
             "SELECT id, mtime FROM files WHERE path = ?",
-            (path,)
-        )
-        row = cur.fetchone()
+            (path,),
+        ).fetchone()
+        if row and row["mtime"] >= mtime:
+            return False
+
         if row:
-            if row["mtime"] >= mtime:
-                return False  # unchanged
             file_id = row["id"]
             conn.execute(
                 "UPDATE files SET filename = ?, category = ?, mtime = ?, content = ? WHERE id = ?",
                 (filename, category, mtime, content, file_id),
             )
-            conn.execute(
-                "DELETE FROM files_fts WHERE rowid = ?",
-                (file_id,)
-            )
+            conn.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
         else:
+            file_id = None
             cur = conn.execute(
-                "INSERT INTO files (path, filename, category, mtime, content) VALUES (?, ?, ?, ?, ?)",
-                (path, filename, category, mtime, content)
+                "INSERT OR IGNORE INTO files (path, filename, category, mtime, content) VALUES (?, ?, ?, ?, ?)",
+                (path, filename, category, mtime, content),
             )
-            file_id = cur.lastrowid
+            file_id = cur.lastrowid or None
+            if not file_id:
+                row = conn.execute(
+                    "SELECT id, mtime FROM files WHERE path = ?",
+                    (path,),
+                ).fetchone()
+                if not row:
+                    return False
+                if row["mtime"] >= mtime:
+                    return False
+                file_id = row["id"]
+                conn.execute(
+                    "UPDATE files SET filename = ?, category = ?, mtime = ?, content = ? WHERE id = ?",
+                    (filename, category, mtime, content, file_id),
+                )
+                conn.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
 
         # insert into fts
         conn.execute(
@@ -119,3 +131,18 @@ def get_file_mtime(path: str):
     row = cur.fetchone()
     conn.close()
     return row[0] if row else None
+
+
+def delete_file_by_path_category(path: str, category: str) -> bool:
+    conn = get_conn()
+    with conn:
+        row = conn.execute(
+            "SELECT id FROM files WHERE path = ? AND category = ?",
+            (path, category),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM files_fts WHERE rowid = ?", (row["id"],))
+        conn.execute("DELETE FROM files WHERE id = ?", (row["id"],))
+    conn.close()
+    return True

@@ -1,12 +1,15 @@
 # unimain.py
-import os, time, asyncio, threading, sqlite3, traceback
+import os, time, asyncio, threading, sqlite3, traceback, queue
 import subprocess, gc, hashlib, base64
 import socket
 import time
 import shutil
+import sys
+import platform
 import builtins
 import fnmatch
 import mimetypes
+import importlib.util
 import re
 import json
 import ast
@@ -26,6 +29,20 @@ from index_controller.ignore import should_ignore
 from fastapi import Request
 from rclone_service import *
 from auth_manager import start_auth, auth_sessions
+from config import (
+    get_video_directories,
+    get_audio_directories,
+    get_image_directory,
+    get_organized_root,
+    get_watch_directories,
+    get_code_directories,
+    get_enable_text,
+    get_enable_image,
+    get_enable_audio,
+    get_enable_video,
+    get_enable_code,
+)
+from cli.lifecycle import acquire_index_lock, index_lock_active, release_index_lock, update_index_state
 
 _orig_print = builtins.print
 
@@ -39,8 +56,8 @@ def print(*args, **kwargs):
 
 # ── Paths & tunables ─────────────────────────────────────────
 ROOT            = Path(__file__).parent.resolve()
-ORGANIZED_ROOT  = Path("/mnt/storage/organized_files").resolve()
-IMAGE_DIR       = Path("/mnt/storage/organized_files/images")
+ORGANIZED_ROOT  = get_organized_root()
+IMAGE_DIR       = get_image_directory()
 
 WIFI_INTERFACE = "wlan0"
 HOTSPOT_NAME = "RadxaAP"
@@ -189,6 +206,22 @@ CODE_TEXT_EXTENSIONS = {
 CODE_SPECIAL_FILENAMES = {
     "Dockerfile", "Makefile", "CMakeLists.txt", "Jenkinsfile", "Procfile",
 }
+TEXT_WATCH_EXTS = {
+    ".txt", ".md", ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".csv",
+    ".xlsx", ".xls", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini",
+    ".cfg", ".conf", ".log", ".html", ".htm", ".rst", ".tsv", ".rtf", ".ods",
+}
+IMAGE_WATCH_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
+AUDIO_WATCH_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+VIDEO_WATCH_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
+CODE_WATCH_EXTS = CODE_TEXT_EXTENSIONS - {".md", ".txt"}
+
+_watch_queue: queue.Queue = queue.Queue()
+_watch_stop_event = threading.Event()
+_watch_worker_thread: Optional[threading.Thread] = None
+_watch_observer = None
+_watch_debounce_lock = threading.Lock()
+_watch_last_job: dict[tuple[str, str], float] = {}
 
 # NOTE: No idle-unload — whichever family is loaded stays loaded
 #       until the OTHER family is explicitly requested.
@@ -315,9 +348,14 @@ class ResourceManager:
             "--n-predict", "256",
             "--no-mmap",   # avoids page-cache fights on 8 GB RAM
         ]
-        self._llm_proc  = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if platform.system() == "Windows":
+             kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+             
+        self._llm_proc  = subprocess.Popen(cmd, **kwargs)
         self._llm_ready = False
         print(f"   PID {self._llm_proc.pid} — waiting for /health …")
         self._wait_for_ready()
@@ -404,10 +442,50 @@ def get_text_engine():
 def lazy_load_clip():
     global _clip_model, _clip_processor
     if _clip_model is None:
+        import os
         from transformers import CLIPProcessor, CLIPModel
         import torch
-        _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-        _clip_model     = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        prev_hf_offline = os.environ.get("HF_HUB_OFFLINE")
+        prev_tf_offline = os.environ.get("TRANSFORMERS_OFFLINE")
+        try:
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+            _clip_processor = CLIPProcessor.from_pretrained(
+                "openai/clip-vit-base-patch32",
+                local_files_only=True,
+                use_fast=False,
+            )
+            _clip_model = CLIPModel.from_pretrained(
+                "openai/clip-vit-base-patch32",
+                local_files_only=True,
+                use_safetensors=False,
+            )
+        except Exception:
+            if prev_hf_offline is None:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+            else:
+                os.environ["HF_HUB_OFFLINE"] = prev_hf_offline
+            if prev_tf_offline is None:
+                os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            else:
+                os.environ["TRANSFORMERS_OFFLINE"] = prev_tf_offline
+            _clip_processor = CLIPProcessor.from_pretrained(
+                "openai/clip-vit-base-patch32",
+                use_fast=False,
+            )
+            _clip_model = CLIPModel.from_pretrained(
+                "openai/clip-vit-base-patch32",
+                use_safetensors=False,
+            )
+        else:
+            if prev_hf_offline is None:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+            else:
+                os.environ["HF_HUB_OFFLINE"] = prev_hf_offline
+            if prev_tf_offline is None:
+                os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            else:
+                os.environ["TRANSFORMERS_OFFLINE"] = prev_tf_offline
         _clip_model.to(torch.device("cpu")).eval()
     return _clip_model, _clip_processor
 
@@ -557,13 +635,15 @@ def get_next_annoy_id():
 
 
 # ── Scan helpers ──────────────────────────────────────────────
-def scan_text_index():
+def scan_text_index(target_dir: str | None = None):
     try:
         mod = __import__(
             "text_search_implementation_v2.index_worker", fromlist=["run_scan"]
         )
+        scan_dirs = [Path(target_dir).expanduser().resolve()] if target_dir else get_watch_directories()
         if hasattr(mod, "run_scan"):
-            mod.run_scan()
+            for scan_dir in scan_dirs:
+                mod.run_scan(target_dir=str(scan_dir))
             return {"status": "ok", "updated": True}
         if hasattr(mod, "main"):
             mod.main()
@@ -576,38 +656,46 @@ def scan_text_index():
         return {"status": "error"}
 
 
-def scan_image_index():
+def scan_image_index(target_dir: str | Path | None = None):
+    if importlib.util.find_spec("transformers") is None:
+        return {
+            "status": "skipped",
+            "reason": f"transformers not installed; run: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers",
+            "new_vectors": 0,
+        }
     init_image_meta_db()
     known     = get_known_images()
     new_count = 0
     next_aid  = get_next_annoy_id()
     exts      = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
+    scan_roots = [Path(target_dir).expanduser().resolve()] if target_dir else get_watch_directories()
 
-    for p in IMAGE_DIR.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in exts:
-            continue
-        try:
-            mtime = p.stat().st_mtime
-        except Exception:
-            continue
-        s    = str(p)
-        info = known.get(s)
-        if info and abs(info["mtime"] - mtime) < 0.001:
-            continue
-        try:
-            vec = embed_image_file(p)
-        except Exception as e:
-            print("⚠️ embed failed:", e)
-            continue
-        try:
-            import numpy as np
-            np.save(str(IMAGE_EMBED_DIR / f"{next_aid}.npy"), vec)
-        except Exception as e:
-            print("⚠️ save failed:", e)
-            continue
-        add_or_update_image(s, mtime, next_aid)
-        next_aid  += 1
-        new_count += 1
+    for scan_root in scan_roots:
+        for p in scan_root.rglob("*"):
+            if not p.is_file() or p.suffix.lower() not in exts:
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except Exception:
+                continue
+            s    = str(p)
+            info = known.get(s)
+            if info and abs(info["mtime"] - mtime) < 0.001:
+                continue
+            try:
+                vec = embed_image_file(p)
+            except Exception as e:
+                print("⚠️ embed failed:", e)
+                continue
+            try:
+                import numpy as np
+                np.save(str(IMAGE_EMBED_DIR / f"{next_aid}.npy"), vec)
+            except Exception as e:
+                print("⚠️ save failed:", e)
+                continue
+            add_or_update_image(s, mtime, next_aid)
+            next_aid  += 1
+            new_count += 1
 
     if new_count > 0:
         global _annoy_needs_rebuild
@@ -619,24 +707,199 @@ def scan_image_index():
     return {"status": "ok", "new_vectors": new_count}
 
 
-def scan_video_index_wrapper():
+def scan_video_index_wrapper(target_dir: str | None = None):
     try:
-        return get_video_module().scan_video_index(
-            Path("/mnt/storage/organized_files/video")
-        )
+        combined = {"status": "ok", "new_vectors": 0}
+        
+        if target_dir:
+            p = Path(target_dir).expanduser().resolve()
+            if not p.is_dir():
+                return {"status": "error", "error": f"Target directory not found: {p}"}
+            dirs = [p]
+        else:
+            dirs = get_video_directories()
+            
+        for vdir in dirs:
+            if not vdir.is_dir():
+                continue
+            result = get_video_module().scan_video_index(vdir)
+            combined["new_vectors"] += result.get("new_vectors", 0)
+        return combined
     except Exception as e:
         traceback.print_exc()
         return {"status": "error", "error": str(e)}
 
 
-def scan_audio_index_wrapper():
+def scan_audio_index_wrapper(target_dir: str | None = None):
     try:
         import sys
-        subprocess.Popen([sys.executable, "-m", "audio_search_implementation_v2.worker"])
+        if importlib.util.find_spec("faster_whisper") is None:
+            return {
+                "status": "skipped",
+                "reason": f"faster-whisper not installed; run: {sys.executable} -m pip install --no-cache-dir faster-whisper",
+            }
+        # Pass audio directories via env so the worker picks them up
+        env = os.environ.copy()
+        if target_dir:
+            p = Path(target_dir).expanduser().resolve()
+            if not p.is_dir():
+                return {"status": "error", "error": f"Target directory not found: {p}"}
+            env["CONTEXTCORE_AUDIO_DIR"] = str(p)
+        else:
+            audio_dirs = get_audio_directories()
+            env["CONTEXTCORE_AUDIO_DIR"] = str(audio_dirs[0]) if audio_dirs else "."
+            
+        kwargs = {"env": env}
+        if platform.system() == "Windows":
+             kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+             
+        subprocess.Popen([sys.executable, "-m", "audio_search_implementation_v2.worker"], **kwargs)
         return {"status": "accepted"}
     except Exception as e:
         traceback.print_exc()
         return {"status": "error", "error": str(e)}
+
+
+def _watcher_enabled_modalities() -> dict[str, bool]:
+    return {
+        "text": get_enable_text(),
+        "image": get_enable_image(),
+        "audio": get_enable_audio(),
+        "video": get_enable_video(),
+        "code": get_enable_code(),
+    }
+
+
+def _enqueue_watch_job(modality: str, target_dir: Path) -> None:
+    key = (modality, str(target_dir))
+    now = time.time()
+    with _watch_debounce_lock:
+        last = _watch_last_job.get(key, 0.0)
+        if (now - last) < 2.0:
+            return
+        _watch_last_job[key] = now
+    _watch_queue.put({"modality": modality, "target_dir": str(target_dir)})
+
+
+def _route_watch_event(src_path: str) -> None:
+    path = Path(src_path)
+    if not path.exists() or not path.is_file():
+        return
+    suffix = path.suffix.lower()
+    enabled = _watcher_enabled_modalities()
+    scan_dir = path.parent
+
+    if enabled["text"] and suffix in TEXT_WATCH_EXTS:
+        _enqueue_watch_job("text", scan_dir)
+    if enabled["image"] and suffix in IMAGE_WATCH_EXTS:
+        _enqueue_watch_job("image", scan_dir)
+    if enabled["audio"] and suffix in AUDIO_WATCH_EXTS:
+        _enqueue_watch_job("audio", scan_dir)
+    if enabled["video"] and suffix in VIDEO_WATCH_EXTS:
+        _enqueue_watch_job("video", scan_dir)
+    if enabled["code"] and (path.name in CODE_SPECIAL_FILENAMES or suffix in CODE_WATCH_EXTS):
+        _enqueue_watch_job("code", scan_dir)
+
+
+def _content_watch_worker():
+    while not _watch_stop_event.is_set():
+        try:
+            job = _watch_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+
+        modality = str(job.get("modality"))
+        target_dir = str(job.get("target_dir"))
+        try:
+            active, state = index_lock_active()
+            if active:
+                print(f"watcher [{modality}] skipped: full index already running from {state.get('source', 'unknown')}")
+                continue
+            if modality == "text":
+                scan_text_index(target_dir)
+            elif modality == "image":
+                scan_image_index(target_dir)
+            elif modality == "audio":
+                scan_audio_index_wrapper(target_dir)
+            elif modality == "video":
+                scan_video_index_wrapper(target_dir)
+            elif modality == "code":
+                scan_code_index_wrapper(target_dir)
+        except Exception as exc:
+            print(f"watcher [{modality}] error:", exc)
+        finally:
+            _watch_queue.task_done()
+
+
+def start_content_watcher():
+    global _watch_worker_thread, _watch_observer
+
+    if _watch_worker_thread is not None and _watch_worker_thread.is_alive():
+        print("watcher already running")
+        return
+
+    try:
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer
+    except Exception as exc:
+        print(f"watcher disabled: watchdog unavailable: {exc}")
+        return
+
+    class ContentEventHandler(FileSystemEventHandler):
+        def on_created(self, event):
+            if not event.is_directory:
+                _route_watch_event(event.src_path)
+
+        def on_modified(self, event):
+            if not event.is_directory:
+                _route_watch_event(event.src_path)
+
+        def on_moved(self, event):
+            if not event.is_directory:
+                _route_watch_event(event.dest_path)
+
+    _watch_stop_event.clear()
+    _watch_worker_thread = threading.Thread(target=_content_watch_worker, daemon=True, name="contextcore-watcher")
+    _watch_worker_thread.start()
+
+    _watch_observer = Observer()
+    handler = ContentEventHandler()
+    watch_dirs = get_watch_directories()
+    started = 0
+    for watch_dir in watch_dirs:
+        if watch_dir.is_dir():
+            _watch_observer.schedule(handler, str(watch_dir), recursive=True)
+            print(f"watching directory: {watch_dir}")
+            started += 1
+
+    if started == 0:
+        print("watcher not started: no valid watch directories")
+        _watch_stop_event.set()
+        if _watch_worker_thread is not None:
+            _watch_worker_thread.join(timeout=2)
+        _watch_worker_thread = None
+        _watch_observer = None
+        return
+
+    _watch_observer.daemon = True
+    _watch_observer.start()
+    print("content watcher started")
+
+
+def stop_content_watcher():
+    global _watch_observer, _watch_worker_thread
+
+    _watch_stop_event.set()
+    if _watch_observer is not None:
+        try:
+            _watch_observer.stop()
+            _watch_observer.join(timeout=5)
+        except Exception:
+            pass
+        _watch_observer = None
+    if _watch_worker_thread is not None:
+        _watch_worker_thread.join(timeout=5)
+        _watch_worker_thread = None
 
 
 def _manifest_markers_at(path: Path) -> list[str]:
@@ -972,17 +1235,71 @@ def analyze_code_directory(path: Path, threshold: int = 40, max_scan_files: int 
 
 def scan_code_index_wrapper(path: Optional[str] = None) -> dict[str, Any]:
     try:
-        root = Path(path).expanduser().resolve() if path else ORGANIZED_ROOT
-        analysis = analyze_code_directory(root)
-        build = build_code_layer1_index(root)
+        roots = [Path(path).expanduser().resolve()] if path else get_code_directories()
+        reports = []
+        for root in roots:
+            analysis = analyze_code_directory(root)
+            build = build_code_layer1_index(root)
+            reports.append({"root": str(root), "analysis": analysis, "build": build})
         storage_dir = ROOT / "storage"
         storage_dir.mkdir(parents=True, exist_ok=True)
         report_path = storage_dir / "code_index_analysis_latest.json"
-        report_path.write_text(json.dumps({"analysis": analysis, "build": build}, indent=2), encoding="utf-8")
-        return {"status": "ok", "analysis": analysis, "build": build, "report_path": str(report_path)}
+        report_path.write_text(json.dumps({"reports": reports}, indent=2), encoding="utf-8")
+        if len(reports) == 1:
+            return {"status": "ok", "analysis": reports[0]["analysis"], "build": reports[0]["build"], "report_path": str(report_path)}
+        return {"status": "ok", "reports": reports, "report_path": str(report_path)}
     except Exception as e:
         traceback.print_exc()
         return {"status": "error", "error": str(e)}
+
+
+def _startup_catchup_scan() -> None:
+    jobs: list[tuple[str, callable]] = []
+    if get_enable_text():
+        jobs.append(("text", lambda: scan_text_index(None)))
+    if get_enable_image() and importlib.util.find_spec("transformers") is not None:
+        jobs.append(("image", lambda: scan_image_index(None)))
+    elif get_enable_image():
+        print(f"startup catch-up [image] skipped: install with {sys.executable} -m pip install --no-cache-dir torch torchvision transformers")
+    if get_enable_audio() and importlib.util.find_spec("faster_whisper") is not None:
+        jobs.append(("audio", lambda: scan_audio_index_wrapper(None)))
+    elif get_enable_audio():
+        print(f"startup catch-up [audio] skipped: install with {sys.executable} -m pip install --no-cache-dir faster-whisper")
+    if get_enable_video():
+        jobs.append(("video", lambda: scan_video_index_wrapper(None)))
+    if get_enable_code():
+        jobs.append(("code", lambda: scan_code_index_wrapper(None)))
+
+    if not jobs:
+        print("startup catch-up scan skipped: no enabled modalities")
+        return
+
+    targets = [str(path) for path in get_watch_directories()]
+    modalities = [name for name, _ in jobs]
+    acquired, state = acquire_index_lock("startup_catchup", targets, modalities)
+    if not acquired:
+        print(f"startup catch-up scan skipped: index already running from {state.get('source', 'unknown')}")
+        return
+
+    print("startup catch-up scan: checking configured folders for missed files")
+    update_index_state(progress={"stage": "running", "current_modality": None, "completed_modalities": []})
+    completed: list[str] = []
+    try:
+        for name, fn in jobs:
+            try:
+                update_index_state(progress={"stage": "running", "current_modality": name, "completed_modalities": completed})
+                print(f"startup catch-up [{name}] starting")
+                result = fn()
+                completed.append(name)
+                update_index_state(progress={"stage": "running", "current_modality": name, "completed_modalities": completed, "last_result": {name: result}})
+                print(f"startup catch-up [{name}] -> {result}")
+            except Exception as exc:
+                update_index_state(progress={"stage": "failed", "current_modality": name, "completed_modalities": completed})
+                print(f"startup catch-up [{name}] failed: {exc}")
+        release_index_lock(result="completed")
+    except Exception as exc:
+        release_index_lock(result="failed", error=str(exc))
+        raise
 
 
 def _now_iso() -> str:
@@ -1929,27 +2246,42 @@ rm  = ResourceManager()
 @app.on_event("startup")
 async def startup():
     init_image_meta_db()
-    # No watchdog started — models persist until displaced by opposite family
     print("🚀 unimain started (no idle-unload — models persist until switched)")
     network_bootstrap()
     auto_prewarm = os.getenv("CONTEXTCORE_PREWARM_ON_STARTUP", "1").strip().lower() not in {"0", "false", "no"}
     if auto_prewarm:
-        print("🔥 startup prewarm enabled (text + CLIP)")
+        print("🔥 startup prewarm enabled")
         try:
             get_text_engine()
         except Exception as e:
             print("⚠️ text prewarm failed:", e)
+        if get_enable_image() or get_enable_video():
+            if importlib.util.find_spec("transformers") is None:
+                print(f"⚠️ CLIP prewarm skipped: transformers not installed")
+                print(f"   Install with: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers")
+            else:
+                try:
+                    lazy_load_clip()
+                    print("✅ CLIP prewarmed")
+                except Exception as e:
+                    print("⚠️ CLIP prewarm failed:", e)
+                    print(f"   Retry with: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers")
+
+    if os.getenv("CONTEXTCORE_ENABLE_WATCHER", "1").strip().lower() not in {"0", "false", "no"}:
         try:
-            lazy_load_clip()
-            print("✅ CLIP prewarmed")
+            start_content_watcher()
         except Exception as e:
-            print("⚠️ CLIP prewarm failed:", e)
+            print(f"⚠️ watcher startup failed: {e}")
+
+    if os.getenv("CONTEXTCORE_STARTUP_SCAN", "1").strip().lower() not in {"0", "false", "no"}:
+        threading.Thread(target=_startup_catchup_scan, daemon=True, name="contextcore-startup-scan").start()
 
 
 @app.on_event("shutdown")
 async def shutdown():
     rm._stop_llama_server()
     _unload_embed_models()
+    stop_content_watcher()
 
 
 # ── Health ────────────────────────────────────────────────────
@@ -2131,6 +2463,7 @@ async def index_scan(
     run_audio: bool = True,
     run_code:  bool = False,
     code_path: str | None = None,
+    target_dir: str | None = None,
 ):
     """Fire-and-forget scan. Acquires embed context so it queues
     correctly behind any active LLM call."""
@@ -2140,17 +2473,74 @@ async def index_scan(
             raise HTTPException(404, "code_path directory not found")
         if not _is_path_allowed(code_root):
             raise HTTPException(403, "code_path not allowed")
+            
+    if target_dir:
+        t_root = Path(target_dir).expanduser().resolve()
+        if not t_root.exists() or not t_root.is_dir():
+            raise HTTPException(404, "target_dir not found")
+        if not _is_path_allowed(t_root):
+            raise HTTPException(403, "target_dir not allowed")
+    submitted = [n for n, f in [
+        ("text", run_text), ("image", run_image),
+        ("video", run_video), ("audio", run_audio),
+        ("code", run_code),
+    ] if f]
+    targets = [target_dir] if target_dir else [str(path) for path in get_watch_directories()]
+    acquired, state = acquire_index_lock("manual_scan", targets, submitted)
+    if not acquired:
+        return JSONResponse(
+            status_code=409,
+            content={"status": "busy", "jobs": submitted, "target": target_dir if target_dir else "global", "state": state},
+        )
 
     async def _do_scans():
+        try:
+            async with rm.embed_context():
+                loop = asyncio.get_event_loop()
+                pool = ThreadPoolExecutor(max_workers=SCAN_THREADPOOL)
+                jobs = []
+                completed: list[str] = []
+
+                update_index_state(progress={"stage": "running", "current_modality": None, "completed_modalities": completed})
+
+                if run_text:
+                    jobs.append(("text", loop.run_in_executor(pool, scan_text_index, target_dir)))
+                if run_image:
+                    jobs.append(("image", loop.run_in_executor(pool, scan_image_index, target_dir)))
+                if run_video:
+                    jobs.append(("video", loop.run_in_executor(pool, scan_video_index_wrapper, target_dir)))
+                if run_audio:
+                    jobs.append(("audio", loop.run_in_executor(pool, scan_audio_index_wrapper, target_dir)))
+                if run_code:
+                    jobs.append(("code", loop.run_in_executor(pool, lambda: scan_code_index_wrapper(code_path))))
+
+                for name, fut in jobs:
+                    try:
+                        update_index_state(progress={"stage": "running", "current_modality": name, "completed_modalities": completed})
+                        result = await fut
+                        completed.append(name)
+                        update_index_state(progress={"stage": "running", "current_modality": name, "completed_modalities": completed, "last_result": {name: result}})
+                        print(f"scan [{name}]:", result)
+                    except Exception as e:
+                        update_index_state(progress={"stage": "failed", "current_modality": name, "completed_modalities": completed})
+                        print(f"scan [{name}] error:", e)
+                release_index_lock(result="completed")
+                return
+        except Exception as e:
+            release_index_lock(result="failed", error=str(e))
+            raise
         async with rm.embed_context():
             loop = asyncio.get_event_loop()
             pool = ThreadPoolExecutor(max_workers=SCAN_THREADPOOL)
             jobs = []
-            if run_text:  jobs.append(("text",  loop.run_in_executor(pool, scan_text_index)))
-            if run_image: jobs.append(("image", loop.run_in_executor(pool, scan_image_index)))
-            if run_video: jobs.append(("video", loop.run_in_executor(pool, scan_video_index_wrapper)))
-            if run_audio: jobs.append(("audio", loop.run_in_executor(pool, scan_audio_index_wrapper)))
+            
+            # Always call scan helpers directly — they handle target_dir=None as "use config"
+            if run_text:  jobs.append(("text",  loop.run_in_executor(pool, scan_text_index,          target_dir)))
+            if run_image: jobs.append(("image", loop.run_in_executor(pool, scan_image_index,         target_dir)))
+            if run_video: jobs.append(("video", loop.run_in_executor(pool, scan_video_index_wrapper, target_dir)))
+            if run_audio: jobs.append(("audio", loop.run_in_executor(pool, scan_audio_index_wrapper, target_dir)))
             if run_code:  jobs.append(("code",  loop.run_in_executor(pool, lambda: scan_code_index_wrapper(code_path))))
+                
             for name, fut in jobs:
                 try:
                     print(f"scan [{name}]:", await fut)
@@ -2163,7 +2553,7 @@ async def index_scan(
         ("video", run_video), ("audio", run_audio),
         ("code", run_code),
     ] if f]
-    return {"status": "accepted", "jobs": submitted}
+    return {"status": "accepted", "jobs": submitted, "target": target_dir if target_dir else "global"}
 
 
 @app.post("/index/code/analyze")
@@ -3257,4 +3647,3 @@ def network_bootstrap():
         start_hotspot()
 
         NETWORK_STATE["hotspot_active"] = True
-

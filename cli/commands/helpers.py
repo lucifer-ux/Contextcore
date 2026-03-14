@@ -1,0 +1,402 @@
+from __future__ import annotations
+
+import os
+import platform
+import subprocess
+import sys
+import json
+from pathlib import Path
+
+from cli.constants import DEFAULT_PORT
+from cli.env import build_runtime_env
+from cli.lifecycle import get_port_usage, read_index_state
+from cli.paths import get_default_config, get_sdk_root
+from cli.ui import console, error, header, info, success, warning
+
+_SDK_ROOT = get_sdk_root()
+if str(_SDK_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SDK_ROOT))
+
+from config import update_config_values
+from config import get_code_directories, get_enable_code, add_watch_directory, get_watch_directories
+from video_search_implementation_v2.runtime import (
+    persist_resolved_video_tools,
+    prewarm_clip_model,
+    video_runtime_status,
+)
+
+
+def run_index(target: str | None = None) -> None:
+    import sqlite3
+    import time
+    import urllib.parse
+    import urllib.request
+
+    from rich.live import Live
+    from rich.table import Table
+
+    header()
+    from cli.server import ensure_server
+
+    if not ensure_server(silent=True):
+        error("Could not start server. Run  contextcore serve  manually.")
+        console.print("  [dim]Copy/paste:[/dim] [bold]contextcore serve[/bold]")
+        return
+
+    target_label = target or "configured directories"
+    info(f"Scanning [bold]{target_label}[/bold]...\n")
+
+    params: dict[str, str] = {
+        "run_text": "true",
+        "run_image": "true",
+        "run_video": "true",
+        "run_audio": "true",
+    }
+    if get_enable_code():
+        params["run_code"] = "true"
+        code_dirs = get_code_directories()
+        if code_dirs:
+            params["code_path"] = str(code_dirs[0])
+    if target:
+        params["target_dir"] = target
+        if params.get("run_code") == "true":
+            params["code_path"] = target
+
+    url = f"http://127.0.0.1:{DEFAULT_PORT}/index/scan?" + urllib.parse.urlencode(params)
+    try:
+        req = urllib.request.Request(url, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+            payload = json.loads(body) if body.strip() else {}
+            if payload.get("status") == "busy":
+                warning("Indexing is already running in another ContextCore job.")
+                state = payload.get("state") or read_index_state()
+                if state:
+                    info(f"Source: {state.get('source', 'unknown')}")
+                    targets = state.get("targets") or []
+                    if targets:
+                        info(f"Targets: {', '.join(str(t) for t in targets)}")
+                    modalities = state.get("modalities") or []
+                    if modalities:
+                        info(f"Modalities: {', '.join(modalities)}")
+                console.print("  [dim]Run  [bold]contextcore status[/bold]  to check progress.[/dim]")
+                return
+    except Exception as exc:
+        error(f"Could not reach server: {exc}")
+        console.print("  [dim]Retry the backend in a new terminal:[/dim] [bold]contextcore serve[/bold]")
+        return
+
+    sdk_root = get_sdk_root()
+    text_db = sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
+    image_db = sdk_root / "image_search_implementation_v2" / "storage" / "images_meta.db"
+    video_db = sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db"
+    code_db = sdk_root / "storage" / "code_index_layer1.db"
+
+    def count_rows(db: Path, query: str, fallback: int = -1) -> int:
+        if not db.exists():
+            return fallback
+        try:
+            with sqlite3.connect(str(db)) as conn:
+                return int(conn.execute(query).fetchone()[0])
+        except Exception:
+            return fallback
+
+    def make_table(counts: dict[str, int]) -> Table:
+        runtime = video_runtime_status()
+        table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+        table.add_column("Modality", style="bold", width=10)
+        table.add_column("Indexed", width=10)
+        table.add_column("", width=20)
+        for name, value in counts.items():
+            if value < 0:
+                table.add_row(name, "[dim]-[/dim]", "[dim]waiting...[/dim]")
+            elif value == 0 and name == "Video" and not runtime["ffmpeg_ready"]:
+                table.add_row(name, "[yellow]0[/yellow]", "missing ffmpeg")
+            elif value == 0 and name == "Video" and not runtime["clip_ready"]:
+                table.add_row(name, "[yellow]0[/yellow]", "model unavailable")
+            elif value == 0:
+                table.add_row(name, "[green]0[/green]", "[dim]ready (empty)[/dim]")
+            else:
+                table.add_row(name, f"[green]{value:,}[/green]", "[green]ready[/green]")
+        return table
+
+    last_counts: dict[str, int] = {"Text": -1, "Code": -1, "Images": -1, "Video": -1, "Audio": -1}
+    elapsed = 0.0
+    interval = 2.0
+
+    with Live(console=console, refresh_per_second=2) as live:
+        while True:
+            text_total = count_rows(text_db, "SELECT COUNT(*) FROM files")
+            audio_total = count_rows(text_db, "SELECT COUNT(*) FROM files WHERE LOWER(category)='audio'")
+            doc_total = max(0, text_total - max(0, audio_total)) if text_total >= 0 else -1
+            code_total = count_rows(code_db, "SELECT COUNT(*) FROM project_files")
+            image_total = count_rows(image_db, "SELECT COUNT(*) FROM images")
+            video_total = count_rows(video_db, "SELECT COUNT(*) FROM videos")
+            counts = {
+                "Text": doc_total,
+                "Code": code_total,
+                "Images": image_total,
+                "Video": video_total,
+                "Audio": audio_total,
+            }
+            live.update(make_table(counts))
+            if counts == last_counts and all(v >= 0 for v in counts.values()) and elapsed > 4:
+                break
+            last_counts = counts.copy()
+            time.sleep(interval)
+            elapsed += interval
+
+    console.print()
+    success("Indexing complete")
+    console.print("  [dim]Run  [bold]contextcore status[/bold]  for detailed info.[/dim]")
+    console.print()
+
+
+def run_add_folder(path: str, index_now: bool = True) -> None:
+    header()
+    folder = Path(path).expanduser().resolve()
+    if not folder.exists() or not folder.is_dir():
+        error(f"Directory not found: {folder}")
+        console.print(f"  [dim]Create it first:[/dim] [bold]mkdir \"{folder}\"[/bold]")
+        return
+
+    cfg_path = add_watch_directory(folder)
+    success(f"Added watch folder: [bold]{folder}[/bold]")
+    if cfg_path:
+        success(f"Updated config: [bold]{cfg_path}[/bold]")
+
+    watch_dirs = get_watch_directories()
+    console.print(f"  [dim]Now watching {len(watch_dirs)} folder{'s' if len(watch_dirs) != 1 else ''}.[/dim]")
+
+    ensure_server(silent=True, force_restart=True)
+    console.print("  [dim]Background watcher reloaded to include the new folder.[/dim]")
+
+    if not index_now:
+        console.print(f"  [dim]Index later with:[/dim] [bold]contextcore index \"{folder}\"[/bold]")
+        return
+
+    info(f"Indexing the new folder now: [bold]{folder}[/bold]")
+    run_index(target=str(folder))
+
+
+def reset_index_artifacts() -> None:
+    sdk_root = get_sdk_root()
+    paths = [
+        sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db",
+        sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db-shm",
+        sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db-wal",
+        sdk_root / "image_search_implementation_v2" / "storage" / "images_meta.db",
+        sdk_root / "image_search_implementation_v2" / "storage" / "annoy_index.ann",
+        sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db",
+        sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db-shm",
+        sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db-wal",
+        sdk_root / "video_search_implementation_v2" / "storage" / "runtime_state.json",
+        sdk_root / "storage" / "code_index_layer1.db",
+        sdk_root / "storage" / "code_index_layer1.db-shm",
+        sdk_root / "storage" / "code_index_layer1.db-wal",
+        sdk_root / "storage" / "code_index_analysis_latest.json",
+    ]
+    for path in paths:
+        path.unlink(missing_ok=True)
+    embed_dir = sdk_root / "image_search_implementation_v2" / "storage" / "embeddings"
+    if embed_dir.exists():
+        for child in embed_dir.iterdir():
+            if child.is_file():
+                child.unlink(missing_ok=True)
+
+
+_INSTALL_GROUPS = {
+    "clip": (
+        "CLIP / Vision model",
+        "torch torchvision transformers",
+        "~800MB download  •  typically 5-8 minutes",
+    ),
+    "audio": (
+        "Audio / Whisper model",
+        "faster-whisper",
+        "~150MB download  •  typically 1-2 minutes",
+    ),
+    "all": (
+        "All optional models",
+        "torch torchvision transformers faster-whisper",
+        "~950MB download  •  typically 6-10 minutes",
+    ),
+}
+
+
+def run_install(model: str) -> None:
+    header()
+    key = model.lower().strip()
+    if key not in _INSTALL_GROUPS:
+        error(f"Unknown model: {model}")
+        info(f"Options: {', '.join(_INSTALL_GROUPS)}")
+        return
+
+    label, packages, estimate = _INSTALL_GROUPS[key]
+    console.print(f"  Installing [bold]{label}[/bold]")
+    console.print(f"  [dim]{estimate}[/dim]")
+    console.print("  [dim]You'll see download progress below — this is normal for large packages.[/dim]\n")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--progress-bar", "on", "--no-cache-dir"] + packages.split()
+    )
+    console.print()
+    if result.returncode != 0:
+        error("Install failed")
+        console.print("  [dim]Check your internet connection and try again.[/dim]")
+        console.print(f"  [dim]Retry with:[/dim] [bold]{sys.executable} -m pip install --progress-bar on --no-cache-dir {packages}[/bold]")
+        return
+
+    ffmpeg_ready = True
+    if key == "all":
+        from cli.commands.init import _ensure_ffmpeg
+
+        ffmpeg_ready = _ensure_ffmpeg()
+        tool_paths = persist_resolved_video_tools()
+        if tool_paths:
+            update_config_values(tool_paths)
+
+    if key in {"clip", "all"}:
+        ok, err = prewarm_clip_model()
+        if ok:
+            success("CLIP model warmed and ready")
+        else:
+            warning(f"CLIP prewarm failed: {err}")
+
+    if key in {"audio", "all"}:
+        try:
+            from audio_search_implementation_v2.audio_index import prewarm_whisper
+
+            ok, err = prewarm_whisper()
+        except Exception as exc:
+            ok, err = False, str(exc)
+        if ok:
+            success("Whisper model warmed and ready")
+        else:
+            warning(f"Whisper prewarm failed: {err}")
+
+    success(f"{label} installed successfully")
+    if key == "all" and not ffmpeg_ready:
+        warning("ffmpeg is still unavailable. Video indexing will remain disabled until ffmpeg is installed.")
+        if platform.system().lower() == "windows":
+            console.print("  [dim]Install it with:[/dim] [bold]winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements[/bold]")
+
+    from cli.server import ensure_server, is_server_running
+
+    if is_server_running(DEFAULT_PORT):
+        ensure_server(port=DEFAULT_PORT, silent=True, force_restart=True)
+
+
+_TOOL_CONFIGS = {
+    "claude-desktop": {
+        "windows": Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
+        "darwin": Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+        "linux": Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
+    },
+    "claude-code": {
+        "windows": Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
+        "darwin": Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+        "linux": Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
+    },
+    "cline": {
+        "windows": Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "darwin": Path.home() / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "linux": Path.home() / ".config" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+    },
+    "cursor": {
+        "windows": Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "darwin": Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "linux": Path.home() / ".config" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+    },
+    "opencode": {
+        "windows": Path.home() / ".config" / "opencode" / "opencode.json",
+        "darwin": Path.home() / ".config" / "opencode" / "opencode.json",
+        "linux": Path.home() / ".config" / "opencode" / "opencode.json",
+    },
+    "windsurf": {
+        "windows": Path.home() / "AppData" / "Roaming" / "Windsurf" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "darwin": Path.home() / "Library" / "Application Support" / "Windsurf" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "linux": Path.home() / ".config" / "Windsurf" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+    },
+    "continue": {
+        "windows": Path.home() / ".continue" / "config.json",
+        "darwin": Path.home() / ".continue" / "config.json",
+        "linux": Path.home() / ".continue" / "config.json",
+    },
+}
+
+
+def run_register(tool: str) -> None:
+    from cli.commands.init import _inject_mcp_config
+
+    header()
+    key = tool.lower().strip().replace(" ", "-")
+    if key == "list" or not key:
+        info(f"Available tools: {', '.join(_TOOL_CONFIGS)}")
+        return
+
+    plat_key = platform.system().lower()
+    if plat_key not in ("windows", "darwin", "linux"):
+        plat_key = "linux"
+
+    cfg_paths = _TOOL_CONFIGS.get(key)
+    if not cfg_paths:
+        error(f"Unknown tool: {tool}")
+        info(f"Available: {', '.join(_TOOL_CONFIGS)}")
+        return
+
+    cfg_file = cfg_paths[plat_key].expanduser()
+    console.print(f"  Registering ContextCore with [bold]{tool}[/bold]...")
+    if not cfg_file.exists():
+        error(f"Config file not found: {cfg_file}")
+        console.print("  Open the tool once to create its config file, then re-run this command.")
+        return
+
+    if _inject_mcp_config(cfg_file, tool):
+        success(f"ContextCore added to {tool}")
+        success(f"Config updated: {cfg_file}")
+        console.print()
+        console.print(f"  [bold yellow]Restart {tool}[/bold yellow] for the changes to take effect.")
+    else:
+        error(f"Failed to update {tool} config. Run  contextcore doctor  for help.")
+
+
+def run_serve(port: int = DEFAULT_PORT, reload: bool = False) -> None:
+    header()
+    usage = get_port_usage(port)
+    if usage.get("in_use") and not usage.get("is_contextcore"):
+        pid = usage.get("pid")
+        name = usage.get("process_name") or "unknown"
+        error(f"Port {port} is already in use by {name}{f' (PID {pid})' if pid else ''}")
+        if platform.system() == "Windows" and pid:
+            console.print(f"  [dim]Inspect:[/dim] [bold]tasklist /FI \"PID eq {pid}\"[/bold]")
+            console.print(f"  [dim]Stop it if appropriate:[/dim] [bold]taskkill /F /PID {pid}[/bold]")
+        elif pid:
+            console.print(f"  [dim]Inspect:[/dim] [bold]ps -p {pid} -o pid,comm,args[/bold]")
+            console.print(f"  [dim]Stop it if appropriate:[/dim] [bold]kill {pid}[/bold]")
+        console.print(f"  [dim]ContextCore stays on port {port} because MCP expects that endpoint.[/dim]")
+        return
+    info(f"Starting ContextCore server on http://127.0.0.1:{port}")
+    info("Press Ctrl+C to stop.\n")
+
+    env = build_runtime_env({"CONTEXTCORE_CONFIG": str(get_default_config())})
+    cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "unimain:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(port),
+        "--log-level",
+        "info",
+    ]
+    if reload:
+        cmd.append("--reload")
+
+    result = subprocess.run(cmd, cwd=str(get_sdk_root()), env=env)
+    if result.returncode != 0:
+        error("ContextCore server exited with an error")
+        console.print("  [dim]Retry in a clean terminal:[/dim] [bold]contextcore serve[/bold]")
+        console.print("  [dim]If the backend still fails, run:[/dim] [bold]contextcore doctor[/bold]")

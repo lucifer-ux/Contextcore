@@ -1,0 +1,31 @@
+# ContextCore Configuration
+# ──────────────────────────────────────────────────────────────
+# This file configures directories, thresholds, and connector
+# settings for all three layers (SDK, System App, MCP).
+#
+# Resolution order: this file → environment variables → defaults.
+
+storage:
+  organized_root: "."          # CONTEXTCORE_ORGANIZED_ROOT
+
+media:
+  image:
+    directory: "."             # CONTEXTCORE_IMAGE_DIR
+  video:
+    watch_directories:         # CONTEXTCORE_VIDEO_DIR
+      - "."
+    dedup_threshold: 0.85      # CONTEXTCORE_DEDUP_THRESHOLD  (0.0–1.0)
+  audio:
+    watch_directories:         # CONTEXTCORE_AUDIO_DIR
+      - "."
+
+# connectors:                 # Future — Rclone, Airbyte, etc.
+#   rclone:
+#     remote: "gdrive:"
+#     sync_path: "/sync"
+#   airbyte:
+#     sources:
+#       - type: notion
+#         token: "..."
+#       - type: slack
+#         token: "..."

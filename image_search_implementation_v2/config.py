@@ -1,8 +1,15 @@
 # image_search_implementation_v2/config.py
 from pathlib import Path
+import sys
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+from config import get_organized_root, get_image_directory
 
-BASE_DIR = Path("/mnt/storage/organized_files")
-IMAGE_FOLDER = "images"
+BASE_DIR = get_organized_root()
+try:
+    IMAGE_FOLDER = get_image_directory().relative_to(BASE_DIR)
+except ValueError:
+    IMAGE_FOLDER = get_image_directory()
 
 DATA_DIR = Path(__file__).parent / "storage"
 DATA_DIR.mkdir(exist_ok=True)

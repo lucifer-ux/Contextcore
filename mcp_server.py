@@ -20,9 +20,9 @@ from typing import Any
 
 import requests
 from mcp.server.fastmcp import FastMCP
+from cli.constants import DEFAULT_BACKEND_URL
 
 SERVER_NAME = "contextcore-unified"
-DEFAULT_BACKEND_URL = "http://127.0.0.1:8000"
 DEFAULT_TIMEOUT_SECONDS = 120
 
 BACKEND_BASE_URL = os.getenv("CONTEXTCORE_API_BASE_URL", DEFAULT_BACKEND_URL).rstrip("/")
@@ -285,34 +285,8 @@ def _should_auto_reset_budget(session_id: str, query: str) -> bool:
 
 
 def _load_source_config() -> dict[str, Any]:
-    text_base = "/mnt/storage/organized_files"
-    text_folders = ["docs", "spreadsheets", "code"]
-    image_folder = "images"
-
-    try:
-        from text_search_implementation_v2.config import BASE_DIR as tb, TEXT_FOLDERS
-
-        text_base = str(tb)
-        text_folders = sorted(list(TEXT_FOLDERS))
-    except Exception:
-        pass
-
-    try:
-        from image_search_implementation_v2.config import BASE_DIR as ib, IMAGE_FOLDER
-
-        if text_base == "/mnt/storage/organized_files":
-            text_base = str(ib)
-        image_folder = str(IMAGE_FOLDER)
-    except Exception:
-        pass
-
-    return {
-        "base_dir": text_base,
-        "text_folders": text_folders,
-        "image_folder": image_folder,
-        "video_folder": "video",
-        "audio_folder": "audio",
-    }
+    # Deprecated: prefer list_sources() logic directly
+    return {}
 
 
 def _manifest_markers_at(path: Path) -> list[str]:
@@ -777,6 +751,11 @@ def search(
                     "modality": "video",
                     "source": r.get("video_path"),
                     "score": float(r.get("score", 0.0)),
+                    "description": r.get("description", ""),
+                    "best_timestamp": r.get("best_timestamp"),
+                    "transcript_match": r.get("transcript_match", False),
+                    "context_match": r.get("context_match", False),
+                    "ocr_text": r.get("ocr_text", ""),
                 }
             )
         return out
@@ -811,6 +790,159 @@ def search(
         "results": merged,
         "empty_or_low_confidence": (not merged) or all(float(r.get("score", 0.0)) < 0.1 for r in merged),
     }
+
+
+@mcp.tool()
+def fetch_content(
+    path: str,
+    modality: str = "auto",
+) -> dict[str, Any]:
+    """
+    Fetch readable content or metadata for a specific file found via search.
+
+    For video files: returns frame descriptions, timestamps, and transcript
+    excerpts so the agent can understand what is in the video without needing
+    to play it.
+
+    For text/audio files: returns the indexed content/transcript.
+
+    For image files: returns the file path for direct access by local tools.
+
+    WHEN TO CALL:
+    Call this after search() returns a result and you need more detail about
+    a specific file — especially for videos where the search result only has
+    a score and brief description.
+
+    PARAMETERS:
+    - path: the absolute source path from a search result
+    - modality: "auto" (detect from extension), "video", "text", "image"
+    """
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        return {"ok": False, "error": "file_not_found", "path": str(p)}
+
+    # Auto-detect modality
+    if modality == "auto":
+        ext = p.suffix.lower()
+        if ext in {".mp4", ".mkv", ".mov", ".avi", ".webm"}:
+            modality = "video"
+        elif ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}:
+            modality = "image"
+        else:
+            modality = "text"
+
+    if modality == "video":
+        return _fetch_video_content(str(p))
+    elif modality == "image":
+        return {
+            "ok": True,
+            "modality": "image",
+            "path": str(p),
+            "filename": p.name,
+            "next_step": "Use prepare_file_for_tool to access this image.",
+        }
+    else:
+        return _fetch_text_content(str(p))
+
+
+def _fetch_video_content(video_path: str) -> dict[str, Any]:
+    """Retrieve indexed frame descriptions and transcript for a video."""
+    try:
+        video_db = PROJECT_ROOT / "video_search_implementation_v2" / "storage" / "videos_meta.db"
+        if not video_db.exists():
+            return {"ok": False, "error": "video_index_not_found"}
+
+        import sqlite3
+        conn = sqlite3.connect(str(video_db))
+        conn.row_factory = sqlite3.Row
+
+        video_row = conn.execute(
+            "SELECT id FROM videos WHERE path = ?", (video_path,)
+        ).fetchone()
+        if not video_row:
+            conn.close()
+            return {"ok": False, "error": "video_not_indexed", "path": video_path}
+
+        frames = conn.execute(
+            "SELECT timestamp, description, ocr_text FROM frames WHERE video_id = ? ORDER BY timestamp",
+            (video_row["id"],),
+        ).fetchall()
+        conn.close()
+
+        frame_summaries = []
+        for f in frames:
+            ts = f["timestamp"]
+            ts_str = f"{ts:.1f}s" if ts and ts >= 0 else "unknown"
+            frame_summaries.append({
+                "timestamp": ts_str,
+                "description": f["description"] or "no description",
+                "ocr_text": (f["ocr_text"] or "").strip(),
+            })
+
+        # Try to get transcript from text FTS
+        transcript = None
+        try:
+            text_db = PROJECT_ROOT / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
+            if text_db.exists():
+                tconn = sqlite3.connect(str(text_db))
+                tconn.row_factory = sqlite3.Row
+                trow = tconn.execute(
+                    "SELECT content FROM files WHERE path = ? AND category = 'video_transcript'",
+                    (video_path,),
+                ).fetchone()
+                if trow:
+                    transcript = trow["content"]
+                tconn.close()
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "modality": "video",
+            "path": video_path,
+            "filename": Path(video_path).name,
+            "frame_count": len(frame_summaries),
+            "frames": frame_summaries[:20],  # Cap at 20 for context window
+            "transcript_available": transcript is not None,
+            "transcript_excerpt": (transcript[:2000] + "...") if transcript and len(transcript) > 2000 else transcript,
+            "context_available": any(frame.get("description") or frame.get("ocr_text") for frame in frame_summaries),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _fetch_text_content(file_path: str) -> dict[str, Any]:
+    """Retrieve indexed text content for a file."""
+    try:
+        text_db = PROJECT_ROOT / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
+        if not text_db.exists():
+            return {"ok": False, "error": "text_index_not_found"}
+
+        import sqlite3
+        conn = sqlite3.connect(str(text_db))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT filename, category, content FROM files WHERE path = ?",
+            (file_path,),
+        ).fetchone()
+        conn.close()
+
+        if not row:
+            return {"ok": False, "error": "file_not_indexed", "path": file_path}
+
+        content = row["content"] or ""
+        return {
+            "ok": True,
+            "modality": "text",
+            "path": file_path,
+            "filename": row["filename"],
+            "category": row["category"],
+            "content": content[:5000],  # Cap for context window
+            "content_truncated": len(content) > 5000,
+            "total_length": len(content),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @mcp.tool()
@@ -1028,39 +1160,33 @@ def index_content(
     run_image: bool = True,
     run_video: bool = True,
     run_audio: bool = True,
+    target_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     Trigger a background scan to index new or updated files from all
-    configured sources. Returns immediately - indexing runs in background.
+    configured sources, or a specific directory if provided. Returns immediately.
 
     WHEN TO CALL:
     Only call this if:
     - The user explicitly says content is missing from search results
     - The user says "re-index", "refresh", or "scan my files"
-    - search() returned empty results and the user confirms the content
-      should exist
+    - The user asks to index a specific folder (use target_dir)
 
-    Do NOT call this proactively before every search. Only call when
-    the user has indicated something is out of date or missing.
-
-    PARAMETERS:
-    Set a modality to False only if the user specifically says to skip it.
-    Default is to scan all modalities.
-
-    AFTER CALLING:
-    Tell the user indexing has started in the background and search
-    results will improve within a few minutes for small collections,
-    or longer for large ones. Do not wait for it to complete.
+    Do NOT call this proactively before every search.
     """
+    params = {
+        "run_text": run_text,
+        "run_image": run_image,
+        "run_video": run_video,
+        "run_audio": run_audio,
+    }
+    if target_dir:
+        params["target_dir"] = target_dir
+
     return _request_json(
         "POST",
         "/index/scan",
-        params={
-            "run_text": run_text,
-            "run_image": run_image,
-            "run_video": run_video,
-            "run_audio": run_audio,
-        },
+        params=params,
         timeout=30,
     )
 
@@ -1071,23 +1197,25 @@ def list_sources() -> dict[str, Any]:
     Return what content sources are currently configured and indexed -
     folders being watched, connectors active, and a count of indexed
     items per modality.
-
-    WHEN TO CALL:
-    Call this only if:
-    - The user asks "what do you have access to" or "what's indexed"
-    - The user asks "where are you searching" or "what sources do you use"
-    - You need to tell the user why search returned nothing (to show
-      what is and isn't connected)
-
-    Do NOT call this before every search. Only call on explicit user
-    request about available sources.
-
-    AFTER CALLING:
-    Summarize the sources in plain language. Tell the user what folders
-    or services are connected and roughly how much content is indexed.
     """
-    cfg = _load_source_config()
-    base_dir = cfg["base_dir"]
+    try:
+        from config import get_organized_root, get_video_directories, get_audio_directories, get_image_directory
+        base_dir = str(get_organized_root())
+        text_folders = ["docs", "spreadsheets", "code"]
+        
+        def _rel(p):
+            try: return str(p.relative_to(get_organized_root()))
+            except ValueError: return str(p)
+            
+        folders_cfg = {
+            "text": [str(get_organized_root() / f) for f in text_folders],
+            "images": str(get_image_directory()),
+            "videos": [str(p) for p in get_video_directories()],
+            "audio": [str(p) for p in get_audio_directories()],
+        }
+    except Exception:
+        base_dir = "."
+        folders_cfg = {}
 
     text_db = PROJECT_ROOT / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
     image_db = PROJECT_ROOT / "image_search_implementation_v2" / "storage" / "images_v2.db"
@@ -1112,12 +1240,7 @@ def list_sources() -> dict[str, Any]:
         "ok": True,
         "sources": {
             "base_dir": base_dir,
-            "folders": {
-                "text": [str(Path(base_dir) / f) for f in cfg["text_folders"]],
-                "images": str(Path(base_dir) / cfg["image_folder"]),
-                "videos": str(Path(base_dir) / cfg["video_folder"]),
-                "audio": str(Path(base_dir) / cfg["audio_folder"]),
-            },
+            "folders": folders_cfg,
             "connectors": {
                 "filesystem": True,
                 "qdrant": bool(qdrant_status),

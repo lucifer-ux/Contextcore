@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────────────────
+# requirements.optional.txt  —  HEAVY ML DEPENDENCIES
+# These are NOT installed automatically. They are downloaded on demand:
+#   contextcore install clip     → installs torch + transformers
+#   contextcore install audio    → installs faster-whisper
+#
+# Or install everything at once for development:
+#   pip install -r requirements.optional.txt
+# ─────────────────────────────────────────────────────────────────────
+
+# Vision / image / video search (CLIP)
+torch
+torchvision
+transformers
+
+# Audio / meeting transcription (Whisper)
+faster-whisper
+
+# Vector database (optional Qdrant backend)
+qdrant-client
+
+# OCR (optional text extraction from images)
+pytesseract

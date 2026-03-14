@@ -1,21 +1,31 @@
+# ─────────────────────────────────────────────────────────────────────
+# requirements.txt  —  LIGHTWEIGHT BASE DEPENDENCIES ONLY
+# These are the only packages installed during  pip install contextcore
+# Heavy ML models are downloaded separately via  contextcore install
+# ─────────────────────────────────────────────────────────────────────
+
+# Server
 fastapi
-uvicorn
+uvicorn[standard]
 requests
+
+# MCP protocol
 mcp[cli]
 
-numpy
-pandas
-rapidfuzz
-annoy
+# Search / indexing
+sqlite-vec
+watchdog
 pypdf
+numpy
+rapidfuzz
 
-torch
-transformers
-Pillow
-qdrant-client
-faster-whisper
-pytesseract
-
+# Document file formats
 openpyxl
 xlrd
 odfpy
+Pillow
+
+# CLI
+typer
+rich
+questionary
