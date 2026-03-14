@@ -46,6 +46,39 @@ Optional but important:
 - `ffmpeg` for video indexing
 - Claude Desktop or another MCP-capable tool if you want interactive AI integration
 
+## Quick Install
+
+### Windows (PowerShell)
+
+Quick start (pipe to PowerShell - review first):
+```powershell
+irm https://your-domain.com/install.ps1 | iex
+```
+
+Safe start (download and inspect first):
+```powershell
+Invoke-WebRequest -Uri https://your-domain.com/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+### macOS / Linux (bash)
+
+Quick start (pipe to bash - review first):
+```bash
+curl -sL https://your-domain.com/install.sh | bash
+```
+
+Safe start (download and inspect first):
+```bash
+curl -sL https://your-domain.com/install.sh -o install.sh
+chmod +x install.sh && ./install.sh
+```
+
+After installation, open a NEW terminal and run:
+```bash
+contextcore init
+```
+
 ## Install From Source
 
 ### Windows
