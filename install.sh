@@ -9,12 +9,18 @@
 #   curl -sL https://your-domain.com/install.sh -o install.sh
 #   chmod +x install.sh && ./install.sh
 #
+# CUSTOM REPO (point to your fork):
+#   curl -sL https://your-domain.com/install.sh | REPO_URL=https://github.com/you/fork.git bash
+#
 # LOCAL DEVELOPMENT:
 #   chmod +x install.sh && ./install.sh
 
 set -euo pipefail
 
-SDK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Allow overriding repo URL for custom forks
+REPO_URL="${REPO_URL:-https://github.com/anomalyco/opencode.git}"
+REPO_BRANCH="${REPO_BRANCH:-main}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.contextcore}"
 
 # Colors
 RED='\033[0;31m'
@@ -43,7 +49,38 @@ write_error() {
     echo -e "  [ERROR] ${RED}$1${NC}"
 }
 
-# ── 1. Check Python ────────────────────────────────────────────────────────────
+# Detect if running locally (repo exists) or remotely (need to clone)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IS_LOCAL_REPO=false
+
+# Check if this looks like a ContextCore repo (has required files)
+if [ -f "$SCRIPT_DIR/setup.py" ] && [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+    IS_LOCAL_REPO=true
+    SDK_DIR="$SCRIPT_DIR"
+fi
+
+# ── 1. Clone repo if running remotely ─────────────────────────────────────────
+if [ "$IS_LOCAL_REPO" = false ]; then
+    write_step "Cloning ContextCore repository..."
+    echo -e "  Repo: ${CYAN}$REPO_URL${NC}"
+    echo -e "  Branch: ${CYAN}$REPO_BRANCH${NC}"
+    echo -e "  Install dir: ${CYAN}$INSTALL_DIR${NC}"
+    
+    if [ -d "$INSTALL_DIR" ]; then
+        write_warn "Install directory already exists, will update..."
+        cd "$INSTALL_DIR"
+        git fetch origin
+        git checkout origin/$REPO_BRANCH
+    else
+        git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"
+    fi
+    
+    SDK_DIR="$INSTALL_DIR"
+    cd "$SDK_DIR"
+    write_ok "Repository cloned"
+fi
+
+# ── 2. Check Python ────────────────────────────────────────────────────────────
 write_step "Checking Python..."
 if command -v python3 &> /dev/null; then
     PYTHON=python3
@@ -56,7 +93,7 @@ else
     exit 1
 fi
 
-# ── 2. Check Python version (require >= 3.10) ─────────────────────────────────
+# ── 3. Check Python version (require >= 3.10) ─────────────────────────────────
 write_step "Checking Python version..."
 PYTHON_VERSION=$($PYTHON -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
 PYTHON_MAJOR=$($PYTHON -c 'import sys; print(sys.version_info[0])')
@@ -68,7 +105,7 @@ if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" 
 fi
 write_ok "Found Python $PYTHON_VERSION"
 
-# ── 3. Check/Install ffmpeg (for video indexing) ───────────────────────────────
+# ── 4. Check/Install ffmpeg (for video indexing) ───────────────────────────────
 write_step "Checking ffmpeg (for video indexing)..."
 if command -v ffmpeg &> /dev/null; then
     write_ok "ffmpeg already installed"
@@ -94,7 +131,7 @@ else
     fi
 fi
 
-# ── 4. Create venv ────────────────────────────────────────────────────────────
+# ── 5. Create venv ────────────────────────────────────────────────────────────
 write_step "Creating virtual environment..."
 if [ ! -d "$SDK_DIR/.venv" ]; then
     $PYTHON -m venv "$SDK_DIR/.venv"
@@ -107,22 +144,22 @@ fi
 VENV_PYTHON="$SDK_DIR/.venv/bin/python"
 VENV_PIP="$SDK_DIR/.venv/bin/pip"
 
-# ── 5. Upgrade pip (critical — pip < 22 can hang on installs) ──────────────────
+# ── 6. Upgrade pip (critical — pip < 22 can hang on installs) ──────────────────
 write_step "Upgrading pip..."
 $VENV_PYTHON -m pip install --upgrade pip
 write_ok "pip upgraded"
 
-# ── 6. Install base dependencies ──────────────────────────────────────────────
+# ── 7. Install base dependencies ──────────────────────────────────────────────
 write_step "Installing base dependencies..."
 $VENV_PIP install -r "$SDK_DIR/requirements.txt"
 write_ok "Base dependencies installed"
 
-# ── 7. Install contextcore CLI (editable install - idempotent) ─────────────────
+# ── 8. Install contextcore CLI (editable install - idempotent) ─────────────────
 write_step "Installing contextcore CLI..."
 $VENV_PIP install -e "$SDK_DIR"
 write_ok "contextcore CLI installed"
 
-# ── 8. Verify CLI works ─────────────────────────────────────────────────────────
+# ── 9. Verify CLI works ─────────────────────────────────────────────────────────
 write_step "Verifying CLI..."
 if "$VENV_PYTHON" -m cli.main --version &> /dev/null; then
     write_ok "contextcore CLI is ready"
@@ -130,7 +167,6 @@ else
     write_warn "Could not verify CLI in current session"
 fi
 
-# ── 9. Done — hand off to the wizard in NEW TERMINAL ─────────────────────────
 trap - EXIT
 
 echo ""

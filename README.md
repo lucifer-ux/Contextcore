@@ -46,7 +46,9 @@ Optional but important:
 - `ffmpeg` for video indexing
 - Claude Desktop or another MCP-capable tool if you want interactive AI integration
 
-## Quick Install
+## Quick Install (One-Command Setup)
+
+The installer will clone the repo, install dependencies, and set up everything.
 
 ### Windows (PowerShell)
 
@@ -59,6 +61,12 @@ Safe start (download and inspect first):
 ```powershell
 Invoke-WebRequest -Uri https://your-domain.com/install.ps1 -OutFile install.ps1
 powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+Custom repo (your fork):
+```powershell
+$env:REPO_URL = "https://github.com/your-username/your-fork.git"
+irm https://your-domain.com/install.ps1 | iex
 ```
 
 ### macOS / Linux (bash)
@@ -74,12 +82,25 @@ curl -sL https://your-domain.com/install.sh -o install.sh
 chmod +x install.sh && ./install.sh
 ```
 
-After installation, open a NEW terminal and run:
+Custom repo (your fork):
+```bash
+curl -sL https://your-domain.com/install.sh | REPO_URL=https://github.com/your-username/your-fork.git bash
+```
+
+### After Installation
+
+Open a NEW terminal and run:
 ```bash
 contextcore init
 ```
 
-## Install From Source
+This will:
+- Configure your watched directories
+- Install ML models (CLIP, Whisper)
+- Start the backend server
+- Begin initial indexing
+
+## Install From Source (Local Development)
 
 ### Windows
 
