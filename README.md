@@ -52,39 +52,28 @@ The installer will clone the repo, install dependencies, and set up everything.
 
 ### Windows (PowerShell)
 
-Quick start (pipe to PowerShell - review first):
+Quick start:
 ```powershell
-irm https://your-domain.com/install.ps1 | iex
+irm https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 | iex
 ```
 
 Safe start (download and inspect first):
 ```powershell
-Invoke-WebRequest -Uri https://your-domain.com/install.ps1 -OutFile install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 -OutFile install.ps1
 powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-Custom repo (your fork):
-```powershell
-$env:REPO_URL = "https://github.com/your-username/your-fork.git"
-irm https://your-domain.com/install.ps1 | iex
 ```
 
 ### macOS / Linux (bash)
 
-Quick start (pipe to bash - review first):
+Quick start:
 ```bash
-curl -sL https://your-domain.com/install.sh | bash
+curl -sL https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.sh | bash
 ```
 
 Safe start (download and inspect first):
 ```bash
-curl -sL https://your-domain.com/install.sh -o install.sh
+curl -sL https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.sh -o install.sh
 chmod +x install.sh && ./install.sh
-```
-
-Custom repo (your fork):
-```bash
-curl -sL https://your-domain.com/install.sh | REPO_URL=https://github.com/your-username/your-fork.git bash
 ```
 
 ### After Installation

@@ -1,29 +1,24 @@
 # install.ps1
 #
-# ContextCore — One-shot bootstrap for Windows
+# ContextCore - One-shot bootstrap for Windows
 #
-# QUICK START (pipe to PowerShell - review first!):
-#   irm https://your-domain.com/install.ps1 | iex
+# QUICK START:
+# irm https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 | iex
 #
-# SAFE START (download and inspect first):
-#   Invoke-WebRequest -Uri https://your-domain.com/install.ps1 -OutFile install.ps1
-#   powershell -ExecutionPolicy Bypass -File install.ps1
-#
-# CUSTOM REPO (point to your fork):
-#   $env:REPO_URL = "https://github.com/you/fork.git"
-#   irm https://your-domain.com/install.ps1 | iex
-#
-# LOCAL DEVELOPMENT:
-#   powershell -ExecutionPolicy Bypass -File install.ps1
+# SAFE START:
+# Invoke-WebRequest -Uri https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 -OutFile install.ps1
+# powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = "Stop"
 
-# Allow overriding repo URL for custom forks
-$RepoUrl = if ($env:REPO_URL) { $env:REPO_URL } else { "https://github.com/anomalyco/opencode.git" }
+# -------------------------------------------------
+# Configuration
+# -------------------------------------------------
+
+$RepoUrl = if ($env:REPO_URL) { $env:REPO_URL } else { "https://github.com/lucifer-ux/SearchEmbedSDK.git" }
 $RepoBranch = if ($env:REPO_BRANCH) { $env:REPO_BRANCH } else { "main" }
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { "$env:USERPROFILE\.contextcore" }
 
-# Detect if running locally (repo exists) or remotely (need to clone)
 $ScriptDir = if ($MyInvocation.MyCommand.Path) { 
     Split-Path -Parent $MyInvocation.MyCommand.Path 
 } else { 
@@ -36,144 +31,268 @@ if ((Test-Path "$ScriptDir\setup.py") -and (Test-Path "$ScriptDir\requirements.t
     $SDK = $ScriptDir
 }
 
+# -------------------------------------------------
+# Helper functions
+# -------------------------------------------------
+
 function Write-Step($msg) {
     Write-Host ""
-    Write-Host "  --> $msg" -ForegroundColor Cyan
+    Write-Host " --> $msg" -ForegroundColor Cyan
 }
 
 function Write-Ok($msg) {
-    Write-Host "  [OK] $msg" -ForegroundColor Green
+    Write-Host " [OK] $msg" -ForegroundColor Green
 }
 
 function Write-Warn($msg) {
-    Write-Host "  [!!] $msg" -ForegroundColor Yellow
+    Write-Host " [!!] $msg" -ForegroundColor Yellow
 }
 
-function Write-Error($msg) {
-    Write-Host "  [ERROR] $msg" -ForegroundColor Red
+function Write-Err($msg) {
+    Write-Host " [ERROR] $msg" -ForegroundColor Red
 }
 
-# ── 1. Clone repo if running remotely ─────────────────────────────────────────
+# -------------------------------------------------
+# Clone / Update repository
+# -------------------------------------------------
+
 if (-not $IsLocalRepo) {
-    Write-Step "Cloning ContextCore repository..."
-    Write-Host "  Repo: $RepoUrl" -ForegroundColor Cyan
-    Write-Host "  Branch: $RepoBranch" -ForegroundColor Cyan
-    Write-Host "  Install dir: $InstallDir" -ForegroundColor Cyan
-    
-    if (Test-Path $InstallDir) {
-        Write-Warn "Install directory already exists, will update..."
+
+    Write-Step "Preparing repository"
+    Write-Host " Repo: $RepoUrl"
+    Write-Host " Branch: $RepoBranch"
+    Write-Host " Install dir: $InstallDir"
+
+    if (Test-Path "$InstallDir\.git") {
+
+        Write-Warn "Existing repository found - updating"
         Set-Location $InstallDir
+
         git fetch origin
-        git checkout origin/$RepoBranch
+        git checkout $RepoBranch
+        git pull origin $RepoBranch
+
     } else {
+
+        if (Test-Path $InstallDir) {
+            Write-Warn "Directory exists but not a repo - removing"
+            Remove-Item $InstallDir -Recurse -Force
+        }
+
+        Write-Step "Cloning repository"
         git clone --branch $RepoBranch --depth 1 $RepoUrl $InstallDir
     }
-    
+
+    if (!(Test-Path $InstallDir)) {
+        Write-Err "Repository clone failed"
+        exit 1
+    }
+
     $SDK = $InstallDir
     Set-Location $SDK
-    Write-Ok "Repository cloned"
+
+    Write-Ok "Repository ready"
 }
 
-# ── 2. Check Python ────────────────────────────────────────────────────────────
-Write-Step "Checking Python..."
-$pyver = python --version 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Python not found. Download from https://python.org/downloads"
+# -------------------------------------------------
+# Verify required project files
+# -------------------------------------------------
+
+if (!(Test-Path "$SDK\requirements.txt")) {
+    Write-Err "requirements.txt missing - clone likely failed"
     exit 1
 }
+
+if (!(Test-Path "$SDK\setup.py") -and !(Test-Path "$SDK\pyproject.toml")) {
+    Write-Err "Python project metadata missing"
+    exit 1
+}
+
+# -------------------------------------------------
+# Check Python
+# -------------------------------------------------
+
+Write-Step "Checking Python"
+
+$pyver = python --version 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Python not found. Install from https://python.org"
+    exit 1
+}
+
 Write-Ok "Found $pyver"
 
-# ── 3. Check Python version (require >= 3.10) ─────────────────────────────────
-Write-Step "Checking Python version..."
-$pyVersion = python -c "import sys; print('.'.join(map(str, sys.version_info[:2])))"
+Write-Step "Checking Python version"
+
 $pyMajor = python -c "import sys; print(sys.version_info[0])"
 $pyMinor = python -c "import sys; print(sys.version_info[1])"
 
 if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 10)) {
-    Write-Error "Python 3.10+ required, found $pyVersion"
+    Write-Err "Python 3.10+ required"
     exit 1
 }
-Write-Ok "Python $pyVersion meets requirement"
 
-# ── 4. Check/Install ffmpeg ────────────────────────────────────────────────────
-Write-Step "Checking ffmpeg (for video indexing)..."
+Write-Ok "Python version supported"
+
+# -------------------------------------------------
+# Check ffmpeg
+# -------------------------------------------------
+
+Write-Step "Checking ffmpeg"
+
 $ffmpegCheck = Get-Command ffmpeg -ErrorAction SilentlyContinue
+
 if (-not $ffmpegCheck) {
-    Write-Warn "ffmpeg not found. Attempting to install via winget..."
-    
+
+    Write-Warn "ffmpeg not found, attempting winget install"
+
     $wingetCheck = Get-Command winget -ErrorAction SilentlyContinue
+
     if ($wingetCheck) {
-        winget install Gyan.FFmpeg --accept-source-agreements --accept-package-agreements -h 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-            Write-Ok "ffmpeg installed"
-        } else {
-            Write-Warn "winget install failed. Install ffmpeg manually from https://ffmpeg.org/download.html"
-        }
+
+        winget install Gyan.FFmpeg `
+            --accept-source-agreements `
+            --accept-package-agreements `
+            -h 2>$null
+
+        Write-Ok "ffmpeg install attempted"
+
     } else {
-        Write-Warn "winget not found. Install ffmpeg manually from https://ffmpeg.org/download.html"
+
+        Write-Warn "winget not available. Install ffmpeg manually."
+
     }
-    
-    $ffmpegCheck = Get-Command ffmpeg -ErrorAction SilentlyContinue
-    if ($ffmpegCheck) {
-        Write-Ok "ffmpeg is now available"
-    }
+
 } else {
+
     Write-Ok "ffmpeg already installed"
+
 }
 
-# ── 5. Create venv ────────────────────────────────────────────────────────────
-Write-Step "Creating virtual environment..."
-if (-not (Test-Path "$SDK\.venv")) {
+# -------------------------------------------------
+# Create virtual environment
+# -------------------------------------------------
+
+Write-Step "Creating virtual environment"
+
+if (!(Test-Path "$SDK\.venv")) {
+
     python -m venv "$SDK\.venv"
-    Write-Ok "Created .venv"
+    Write-Ok ".venv created"
+
 } else {
-    Write-Ok ".venv already exists, reusing"
+
+    Write-Ok ".venv already exists"
+
 }
 
-# Get venv Python path (use explicitly instead of relying on activation)
 $VenvPython = "$SDK\.venv\Scripts\python.exe"
 $VenvPip = "$SDK\.venv\Scripts\pip.exe"
 
-# ── 6. Upgrade pip (critical — pip < 22 can hang on installs) ──────────────────
-Write-Step "Upgrading pip..."
+# -------------------------------------------------
+# Upgrade pip
+# -------------------------------------------------
+
+Write-Step "Upgrading pip"
+
 & $VenvPython -m pip install --upgrade pip
+
 Write-Ok "pip upgraded"
 
-# ── 7. Install base dependencies ───────────────────────────────────────────────
-Write-Step "Installing base dependencies..."
-& $VenvPip install -r "$SDK\requirements.txt"
-Write-Ok "Base dependencies installed"
+# -------------------------------------------------
+# Install dependencies
+# -------------------------------------------------
 
-# ── 8. Install contextcore CLI (editable install - idempotent) ─────────────────
-Write-Step "Installing contextcore CLI..."
+Write-Step "Installing dependencies"
+
+& $VenvPip install -r "$SDK\requirements.txt"
+
+Write-Ok "Dependencies installed"
+
+# -------------------------------------------------
+# Install CLI
+# -------------------------------------------------
+
+Write-Step "Installing contextcore CLI"
+
 & $VenvPip install -e "$SDK"
+
 Write-Ok "contextcore CLI installed"
 
-# ── 9. Verify CLI works ─────────────────────────────────────────────────────────
-Write-Step "Verifying CLI..."
-$cliTest = & $VenvPython -m cli.main --version 2>&1
-if ($LASTEXITCODE -eq 0) {
-    Write-Ok "contextcore CLI is ready"
-} else {
-    Write-Warn "Could not verify CLI in current session"
+# -------------------------------------------------
+# Create global launcher
+# -------------------------------------------------
+
+Write-Step "Creating global contextcore command"
+
+$UserBin = "$env:USERPROFILE\.contextcore\bin"
+
+if (!(Test-Path $UserBin)) {
+    New-Item -ItemType Directory -Path $UserBin | Out-Null
 }
 
-# ── 10. Done — hand off to the wizard in NEW TERMINAL ─────────────────────────
+$Launcher = "$UserBin\contextcore.ps1"
+
+$Script = @"
+& '$SDK\.venv\Scripts\python.exe' -m cli.main @args
+"@
+
+Set-Content -Path $Launcher -Value $Script
+
+Write-Ok "contextcore launcher created"
+
+# -------------------------------------------------
+# Add directory to PATH permanently
+# -------------------------------------------------
+
+$CurrentUserPath = [Environment]::GetEnvironmentVariable("Path","User")
+
+if ($CurrentUserPath -notlike "*$UserBin*") {
+
+    Write-Step "Adding contextcore to PATH"
+
+    $NewPath = "$CurrentUserPath;$UserBin"
+
+    [Environment]::SetEnvironmentVariable(
+        "Path",
+        $NewPath,
+        [EnvironmentVariableTarget]::User
+    )
+
+    Write-Ok "PATH updated"
+}
+
+# Also update PATH for current session
+$env:Path += ";$UserBin"
+# -------------------------------------------------
+# Verify CLI
+# -------------------------------------------------
+
+Write-Step "Verifying CLI"
+
+$test = & "$UserBin\contextcore.ps1" --help 2>&1
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "contextcore command works"
+} else {
+    Write-Warn "CLI verification skipped"
+}
+# -------------------------------------------------
+# Done
+# -------------------------------------------------
+
 Write-Host ""
-Write-Host "─────────────────────────────────────────" -ForegroundColor Cyan
-Write-Host "  Installation complete!" -ForegroundColor Green  
+Write-Host "-----------------------------------------"
+Write-Host " Installation complete!"
 Write-Host ""
-Write-Host "  IMPORTANT: Open a NEW terminal/tab, then run:" -ForegroundColor White
+Write-Host " Run the following command in a new terminal:"
 Write-Host ""
-Write-Host "    cd $SDK" -ForegroundColor Yellow
-Write-Host "    .\.venv\Scripts\Activate.ps1" -ForegroundColor Yellow
-Write-Host "    contextcore init" -ForegroundColor Yellow
+Write-Host " contextcore init"
 Write-Host ""
-Write-Host "  This will:" -ForegroundColor Gray
-Write-Host "    - Configure your watched directories" -ForegroundColor Gray
-Write-Host "    - Install ML models (CLIP, Whisper)" -ForegroundColor Gray
-Write-Host "    - Start the backend server" -ForegroundColor Gray
-Write-Host "    - Begin initial indexing" -ForegroundColor Gray
-Write-Host "─────────────────────────────────────────" -ForegroundColor Cyan
+Write-Host " This will:"
+Write-Host " - Configure watched directories"
+Write-Host " - Install ML models CLIP and Whisper"
+Write-Host " - Start backend server"
+Write-Host " - Begin indexing"
+Write-Host "-----------------------------------------"
 Write-Host ""
