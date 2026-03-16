@@ -1,5 +1,7 @@
-# install.ps1
+```powershell
 # ContextCore Windows Installer
+# Usage:
+# irm https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
@@ -15,10 +17,22 @@ $InstallDir = "$env:USERPROFILE\.contextcore"
 # Helper functions
 # -------------------------------------------------
 
-function Write-Step($msg) { Write-Host "`n--> $msg" -ForegroundColor Cyan }
-function Write-Ok($msg) { Write-Host "[OK] $msg" -ForegroundColor Green }
-function Write-Warn($msg) { Write-Host "[!!] $msg" -ForegroundColor Yellow }
-function Write-Err($msg) { Write-Host "[ERROR] $msg" -ForegroundColor Red }
+function Write-Step($msg) {
+    Write-Host ""
+    Write-Host "--> $msg" -ForegroundColor Cyan
+}
+
+function Write-Ok($msg) {
+    Write-Host "[OK] $msg" -ForegroundColor Green
+}
+
+function Write-Warn($msg) {
+    Write-Host "[!!] $msg" -ForegroundColor Yellow
+}
+
+function Write-Err($msg) {
+    Write-Host "[ERROR] $msg" -ForegroundColor Red
+}
 
 function Refresh-Path {
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
@@ -26,13 +40,22 @@ function Refresh-Path {
 }
 
 # -------------------------------------------------
-# Check winget
+# Detect winget
 # -------------------------------------------------
 
 $winget = Get-Command winget -ErrorAction SilentlyContinue
+
 if (-not $winget) {
-    Write-Err "winget is required but not available."
-    Write-Host "Please install Git and Python manually."
+
+    Write-Err "winget not available."
+
+    Write-Host ""
+    Write-Host "Please install the following manually:"
+    Write-Host "Git: https://git-scm.com/download/win"
+    Write-Host "Python 3.10+: https://python.org/downloads"
+    Write-Host "ffmpeg: https://ffmpeg.org/download.html"
+    Write-Host ""
+    Write-Host "Then run installer again."
     return
 }
 
@@ -54,16 +77,18 @@ if (-not $git) {
         -h
 
     Refresh-Path
+
     $git = Get-Command git -ErrorAction SilentlyContinue
 }
 
 if (-not $git) {
+
     Write-Err "Git installation failed."
-    Write-Host "Install Git manually from https://git-scm.com/download/win"
+    Write-Host "Install manually: https://git-scm.com/download/win"
     return
 }
 
-Write-Ok "Git found"
+Write-Ok "Git ready"
 
 # -------------------------------------------------
 # Check Python
@@ -83,17 +108,19 @@ if (-not $python) {
         -h
 
     Refresh-Path
+
     $python = Get-Command python -ErrorAction SilentlyContinue
 }
 
 if (-not $python) {
+
     Write-Err "Python installation failed."
-    Write-Host "Install Python from https://python.org"
+    Write-Host "Install Python manually: https://python.org/downloads"
     return
 }
 
 $pyver = python --version
-Write-Ok "$pyver"
+Write-Ok "$pyver detected"
 
 # -------------------------------------------------
 # Clone repository
@@ -124,9 +151,7 @@ if (!(Test-Path $InstallDir)) {
     return
 }
 
-$SDK = $InstallDir
-Set-Location $SDK
-
+Set-Location $InstallDir
 Write-Ok "Repository ready"
 
 # -------------------------------------------------
@@ -152,17 +177,17 @@ if (-not $ffmpeg) {
 Write-Ok "ffmpeg ready"
 
 # -------------------------------------------------
-# Create virtual environment
+# Create Python environment
 # -------------------------------------------------
 
-Write-Step "Creating Python environment"
+Write-Step "Creating Python virtual environment"
 
-if (!(Test-Path "$SDK\.venv")) {
-    python -m venv "$SDK\.venv"
+if (!(Test-Path ".\.venv")) {
+    python -m venv .venv
 }
 
-$VenvPython = "$SDK\.venv\Scripts\python.exe"
-$VenvPip = "$SDK\.venv\Scripts\pip.exe"
+$VenvPython = ".\.venv\Scripts\python.exe"
+$VenvPip = ".\.venv\Scripts\pip.exe"
 
 Write-Ok "Virtual environment ready"
 
@@ -173,7 +198,7 @@ Write-Ok "Virtual environment ready"
 Write-Step "Installing dependencies"
 
 & $VenvPython -m pip install --upgrade pip
-& $VenvPip install -r "$SDK\requirements.txt"
+& $VenvPip install -r requirements.txt
 
 Write-Ok "Dependencies installed"
 
@@ -183,7 +208,7 @@ Write-Ok "Dependencies installed"
 
 Write-Step "Installing contextcore CLI"
 
-& $VenvPip install -e "$SDK"
+& $VenvPip install -e .
 
 Write-Ok "CLI installed"
 
@@ -202,10 +227,9 @@ if (!(Test-Path $UserBin)) {
 $Launcher = "$UserBin\contextcore.ps1"
 
 @"
-& '$SDK\.venv\Scripts\python.exe' -m cli.main @args
+& '$InstallDir\.venv\Scripts\python.exe' -m cli.main @args
 "@ | Set-Content $Launcher
 
-# Add to PATH permanently
 $currentPath = [Environment]::GetEnvironmentVariable("Path","User")
 
 if ($currentPath -notlike "*$UserBin*") {
@@ -215,7 +239,6 @@ if ($currentPath -notlike "*$UserBin*") {
         "$currentPath;$UserBin",
         [EnvironmentVariableTarget]::User
     )
-
 }
 
 $env:Path += ";$UserBin"
@@ -232,18 +255,21 @@ $test = & "$UserBin\contextcore.ps1" --help 2>&1
 
 if ($LASTEXITCODE -eq 0) {
     Write-Ok "CLI working"
+} else {
+    Write-Warn "CLI verification skipped"
 }
 
 # -------------------------------------------------
-# Done
+# Finished
 # -------------------------------------------------
 
 Write-Host ""
 Write-Host "-----------------------------------------"
-Write-Host "Installation complete!"
+Write-Host "ContextCore installation complete!"
 Write-Host ""
 Write-Host "Open a NEW terminal and run:"
 Write-Host ""
 Write-Host "contextcore init"
 Write-Host ""
 Write-Host "-----------------------------------------"
+```
