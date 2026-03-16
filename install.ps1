@@ -1,4 +1,3 @@
-```powershell
 # ContextCore Windows Installer
 # Usage:
 # irm https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 | iex
@@ -272,4 +271,3 @@ Write-Host ""
 Write-Host "contextcore init"
 Write-Host ""
 Write-Host "-----------------------------------------"
-```
