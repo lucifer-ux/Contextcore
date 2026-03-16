@@ -55,6 +55,56 @@ function Write-Err($msg) {
 # -------------------------------------------------
 # Clone / Update repository
 # -------------------------------------------------
+Write-Step "Checking Git..."
+
+$gitCheck = Get-Command git -ErrorAction SilentlyContinue
+
+if (-not $gitCheck) {
+
+    Write-Warn "Git is not installed."
+
+    $wingetCheck = Get-Command winget -ErrorAction SilentlyContinue
+
+    if ($wingetCheck) {
+
+        Write-Warn "Attempting to install Git automatically via winget..."
+
+        winget install Git.Git `
+            --accept-source-agreements `
+            --accept-package-agreements `
+            -h 2>$null
+
+        $gitCheck = Get-Command git -ErrorAction SilentlyContinue
+    }
+
+    if (-not $gitCheck) {
+
+        Write-Err "Git is required but was not found."
+
+        Write-Host ""
+        Write-Host "Please install Git and re-run the installer."
+        Write-Host ""
+        Write-Host "Install Git from:"
+        Write-Host "https://git-scm.com/download/win"
+        Write-Host ""
+        Write-Host "After installation, restart PowerShell and run:"
+        Write-Host ""
+        Write-Host "irm https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 | iex"
+        Write-Host ""
+
+        exit 1
+    }
+
+    Write-Ok "Git installed successfully"
+
+} else {
+
+    Write-Ok "Git found"
+
+}
+# -------------------------------------------------
+# Clone / Update repository
+# -------------------------------------------------
 
 if (-not $IsLocalRepo) {
 
