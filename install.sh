@@ -1,28 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
-# ContextCore — One-shot bootstrap for macOS / Linux
+# ContextCore — macOS / Linux installer
 #
-# QUICK START (pipe to bash - review first!):
-#   curl -sL https://your-domain.com/install.sh | bash
-#
-# SAFE START (download and inspect first):
-#   curl -sL https://your-domain.com/install.sh -o install.sh
-#   chmod +x install.sh && ./install.sh
-#
-# CUSTOM REPO (point to your fork):
-#   curl -sL https://your-domain.com/install.sh | REPO_URL=https://github.com/you/fork.git bash
-#
-# LOCAL DEVELOPMENT:
-#   chmod +x install.sh && ./install.sh
+# Usage:
+# curl -sL https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.sh | bash
 
 set -euo pipefail
 
-# Allow overriding repo URL for custom forks
-REPO_URL="${REPO_URL:-https://github.com/anomalyco/opencode.git}"
+REPO_URL="${REPO_URL:-https://github.com/lucifer-ux/SearchEmbedSDK.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.contextcore}"
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -30,159 +18,201 @@ CYAN='\033[0;36m'
 GRAY='\033[0;90m'
 NC='\033[0m'
 
-trap 'last_exit=$?; if [ $last_exit -ne 0 ]; then echo -e "\n${RED}Installation failed (exit code: $last_exit)${NC}"; fi' EXIT
-
 write_step() {
-    echo ""
-    echo -e "  --> ${CYAN}$1${NC}"
+  echo ""
+  echo -e "  --> ${CYAN}$1${NC}"
 }
 
 write_ok() {
-    echo -e "  [OK] ${GREEN}$1${NC}"
+  echo -e "  [OK] ${GREEN}$1${NC}"
 }
 
 write_warn() {
-    echo -e "  [!!] ${YELLOW}$1${NC}"
+  echo -e "  [!!] ${YELLOW}$1${NC}"
 }
 
 write_error() {
-    echo -e "  [ERROR] ${RED}$1${NC}"
+  echo -e "  [ERROR] ${RED}$1${NC}"
 }
 
-# Detect if running locally (repo exists) or remotely (need to clone)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IS_LOCAL_REPO=false
+# -------------------------------------------------
+# Check Git
+# -------------------------------------------------
 
-# Check if this looks like a ContextCore repo (has required files)
-if [ -f "$SCRIPT_DIR/setup.py" ] && [ -f "$SCRIPT_DIR/requirements.txt" ]; then
-    IS_LOCAL_REPO=true
-    SDK_DIR="$SCRIPT_DIR"
+write_step "Checking Git..."
+
+if ! command -v git >/dev/null 2>&1; then
+  write_warn "Git not found. Attempting install..."
+
+  if command -v brew >/dev/null 2>&1; then
+    brew install git
+  elif command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install -y git
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y git
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y git
+  else
+    write_error "Git is required."
+    echo "Install Git from: https://git-scm.com"
+    exit 1
+  fi
 fi
 
-# ── 1. Clone repo if running remotely ─────────────────────────────────────────
-if [ "$IS_LOCAL_REPO" = false ]; then
-    write_step "Cloning ContextCore repository..."
-    echo -e "  Repo: ${CYAN}$REPO_URL${NC}"
-    echo -e "  Branch: ${CYAN}$REPO_BRANCH${NC}"
-    echo -e "  Install dir: ${CYAN}$INSTALL_DIR${NC}"
-    
-    if [ -d "$INSTALL_DIR" ]; then
-        write_warn "Install directory already exists, will update..."
-        cd "$INSTALL_DIR"
-        git fetch origin
-        git checkout origin/$REPO_BRANCH
-    else
-        git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"
-    fi
-    
-    SDK_DIR="$INSTALL_DIR"
-    cd "$SDK_DIR"
-    write_ok "Repository cloned"
+write_ok "Git ready"
+
+# -------------------------------------------------
+# Clone repository
+# -------------------------------------------------
+
+write_step "Preparing repository..."
+
+echo "  Repo: $REPO_URL"
+echo "  Branch: $REPO_BRANCH"
+echo "  Install dir: $INSTALL_DIR"
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+  write_warn "Existing repository detected — updating..."
+
+  cd "$INSTALL_DIR"
+  git fetch origin
+  git checkout "$REPO_BRANCH"
+  git pull origin "$REPO_BRANCH"
+
+else
+  rm -rf "$INSTALL_DIR"
+  git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"
 fi
 
-# ── 2. Check Python ────────────────────────────────────────────────────────────
+if [ ! -d "$INSTALL_DIR" ]; then
+  write_error "Repository clone failed"
+  exit 1
+fi
+
+cd "$INSTALL_DIR"
+
+write_ok "Repository ready"
+
+# -------------------------------------------------
+# Verify project files
+# -------------------------------------------------
+
+if [ ! -f "requirements.txt" ]; then
+  write_error "requirements.txt missing"
+  exit 1
+fi
+
+if [ ! -f "setup.py" ] && [ ! -f "pyproject.toml" ]; then
+  write_error "Python project metadata missing"
+  exit 1
+fi
+
+# -------------------------------------------------
+# Check Python
+# -------------------------------------------------
+
 write_step "Checking Python..."
-if command -v python3 &> /dev/null; then
-    PYTHON=python3
-    PYVER=$(python3 --version 2>&1)
-elif command -v python &> /dev/null; then
-    PYTHON=python
-    PYVER=$(python --version 2>&1)
+
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+  PYTHON=python
 else
-    write_error "Python not found. Download from https://python.org/downloads"
-    exit 1
+  write_error "Python 3.10+ required."
+  echo "Install from: https://python.org/downloads"
+  exit 1
 fi
 
-# ── 3. Check Python version (require >= 3.10) ─────────────────────────────────
-write_step "Checking Python version..."
-PYTHON_VERSION=$($PYTHON -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-PYTHON_MAJOR=$($PYTHON -c 'import sys; print(sys.version_info[0])')
-PYTHON_MINOR=$($PYTHON -c 'import sys; print(sys.version_info[1])')
+PY_VERSION=$($PYTHON -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
 
-if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 10 ]); then
-    write_error "Python 3.10+ required, found $PYTHON_VERSION"
-    exit 1
-fi
-write_ok "Found Python $PYTHON_VERSION"
+write_ok "Python $PY_VERSION detected"
 
-# ── 4. Check/Install ffmpeg (for video indexing) ───────────────────────────────
-write_step "Checking ffmpeg (for video indexing)..."
-if command -v ffmpeg &> /dev/null; then
-    write_ok "ffmpeg already installed"
-else
-    write_warn "ffmpeg not found. Attempting to install..."
-    
-    if command -v brew &> /dev/null; then
-        brew install ffmpeg
-        write_ok "ffmpeg installed via Homebrew"
-    elif command -v apt-get &> /dev/null; then
-        sudo apt-get update && sudo apt-get install -y ffmpeg
-        write_ok "ffmpeg installed via apt"
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y ffmpeg
-        write_ok "ffmpeg installed via yum"
-    elif command -v dnf &> /dev/null; then
-        sudo dnf install -y ffmpeg
-        write_ok "ffmpeg installed via dnf"
-    else
-        write_warn "Could not auto-install ffmpeg. Install manually:"
-        echo -e "    macOS:  brew install ffmpeg${GRAY}"
-        echo -e "    Ubuntu: sudo apt install ffmpeg${GRAY}"
-    fi
+# -------------------------------------------------
+# Check ffmpeg
+# -------------------------------------------------
+
+write_step "Checking ffmpeg..."
+
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  write_warn "ffmpeg not found — attempting install..."
+
+  if command -v brew >/dev/null 2>&1; then
+    brew install ffmpeg
+  elif command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y ffmpeg
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y ffmpeg
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y ffmpeg
+  else
+    write_warn "Install ffmpeg manually."
+  fi
 fi
 
-# ── 5. Create venv ────────────────────────────────────────────────────────────
+write_ok "ffmpeg ready"
+
+# -------------------------------------------------
+# Create venv
+# -------------------------------------------------
+
 write_step "Creating virtual environment..."
-if [ ! -d "$SDK_DIR/.venv" ]; then
-    $PYTHON -m venv "$SDK_DIR/.venv"
-    write_ok "Created .venv"
-else
-    write_ok ".venv already exists, reusing"
+
+if [ ! -d ".venv" ]; then
+  $PYTHON -m venv .venv
 fi
 
-# Get venv Python path (use explicitly instead of relying on activation)
-VENV_PYTHON="$SDK_DIR/.venv/bin/python"
-VENV_PIP="$SDK_DIR/.venv/bin/pip"
+VENV_PYTHON=".venv/bin/python"
+VENV_PIP=".venv/bin/pip"
 
-# ── 6. Upgrade pip (critical — pip < 22 can hang on installs) ──────────────────
-write_step "Upgrading pip..."
+write_ok "Virtual environment ready"
+
+# -------------------------------------------------
+# Install dependencies
+# -------------------------------------------------
+
+write_step "Installing dependencies..."
+
 $VENV_PYTHON -m pip install --upgrade pip
-write_ok "pip upgraded"
+$VENV_PIP install -r requirements.txt
 
-# ── 7. Install base dependencies ──────────────────────────────────────────────
-write_step "Installing base dependencies..."
-$VENV_PIP install -r "$SDK_DIR/requirements.txt"
-write_ok "Base dependencies installed"
+write_ok "Dependencies installed"
 
-# ── 8. Install contextcore CLI (editable install - idempotent) ─────────────────
-write_step "Installing contextcore CLI..."
-$VENV_PIP install -e "$SDK_DIR"
-write_ok "contextcore CLI installed"
+# -------------------------------------------------
+# Install CLI
+# -------------------------------------------------
 
-# ── 9. Verify CLI works ─────────────────────────────────────────────────────────
+write_step "Installing ContextCore CLI..."
+
+$VENV_PIP install -e .
+
+write_ok "CLI installed"
+
+# -------------------------------------------------
+# Verify CLI
+# -------------------------------------------------
+
 write_step "Verifying CLI..."
-if "$VENV_PYTHON" -m cli.main --version &> /dev/null; then
-    write_ok "contextcore CLI is ready"
+
+if "$VENV_PYTHON" -m cli.main --help >/dev/null 2>&1; then
+  write_ok "CLI working"
 else
-    write_warn "Could not verify CLI in current session"
+  write_warn "CLI verification skipped"
 fi
 
-trap - EXIT
+# -------------------------------------------------
+# Finished
+# -------------------------------------------------
 
 echo ""
-echo -e "─────────────────────────────────────────${CYAN}"
-echo -e "  Installation complete!${GREEN}"  
+echo "-----------------------------------------"
+echo "ContextCore installation complete!"
 echo ""
-echo -e "  IMPORTANT: Open a NEW terminal/tab, then run:${NC}"
+echo "Open a NEW terminal and run:"
 echo ""
-echo -e "    cd $SDK_DIR ${YELLOW}"
-echo -e "    source .venv/bin/activate ${YELLOW}"
-echo -e "    contextcore init ${YELLOW}"
+echo "cd $INSTALL_DIR"
+echo "source .venv/bin/activate"
+echo "contextcore init"
 echo ""
-echo -e "  This will:${GRAY}"
-echo -e "    - Configure your watched directories${NC}"
-echo -e "    - Install ML models (CLIP, Whisper)${NC}"
-echo -e "    - Start the backend server${NC}"
-echo -e "    - Begin initial indexing${NC}"
-echo -e "─────────────────────────────────────────${CYAN}"
+echo "-----------------------------------------"
 echo ""
