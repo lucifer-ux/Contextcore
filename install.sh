@@ -135,19 +135,25 @@ write_ok "Python $PY_VERSION detected"
 write_step "Checking ffmpeg..."
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  write_warn "ffmpeg not found — attempting install..."
+    write_warn "ffmpeg not found — attempting install..."
 
-  if command -v brew >/dev/null 2>&1; then
-    brew install ffmpeg
-  elif command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get install -y ffmpeg
-  elif command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y ffmpeg
-  elif command -v yum >/dev/null 2>&1; then
-    sudo yum install -y ffmpeg
-  else
-    write_warn "Install ffmpeg manually."
-  fi
+    if command -v brew >/dev/null 2>&1; then
+        brew install ffmpeg
+
+    elif command -v apt-get >/dev/null 2>&1; then
+        $SUDO apt-get update
+        $SUDO apt-get install -y ffmpeg
+
+    elif command -v dnf >/dev/null 2>&1; then
+        $SUDO dnf install -y ffmpeg
+
+    elif command -v yum >/dev/null 2>&1; then
+        $SUDO yum install -y ffmpeg
+
+    else
+        write_warn "Could not auto-install ffmpeg."
+        echo "Install manually: https://ffmpeg.org/download.html"
+    fi
 fi
 
 write_ok "ffmpeg ready"
