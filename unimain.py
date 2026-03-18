@@ -1239,8 +1239,35 @@ def scan_code_index_wrapper(path: Optional[str] = None) -> dict[str, Any]:
         reports = []
         for root in roots:
             analysis = analyze_code_directory(root)
-            build = build_code_layer1_index(root)
-            reports.append({"root": str(root), "analysis": analysis, "build": build})
+            if analysis.get("is_code_directory"):
+                build = build_code_layer1_index(root)
+                reports.append({"root": str(root), "analysis": analysis, "build": build})
+                continue
+
+            nested_reports = []
+            for nested_root in _discover_nested_code_roots(root):
+                nested_analysis = analyze_code_directory(nested_root)
+                if not nested_analysis.get("is_code_directory"):
+                    continue
+                nested_build = build_code_layer1_index(nested_root)
+                nested_reports.append(
+                    {
+                        "root": str(nested_root),
+                        "analysis": nested_analysis,
+                        "build": nested_build,
+                    }
+                )
+
+            if nested_reports:
+                reports.extend(nested_reports)
+            else:
+                reports.append(
+                    {
+                        "root": str(root),
+                        "analysis": analysis,
+                        "build": {"status": "skipped_not_code_directory", "analysis": analysis},
+                    }
+                )
         storage_dir = ROOT / "storage"
         storage_dir.mkdir(parents=True, exist_ok=True)
         report_path = storage_dir / "code_index_analysis_latest.json"
@@ -1251,6 +1278,63 @@ def scan_code_index_wrapper(path: Optional[str] = None) -> dict[str, Any]:
     except Exception as e:
         traceback.print_exc()
         return {"status": "error", "error": str(e)}
+
+
+def _discover_nested_code_roots(root: Path, max_candidates: int = 200) -> list[Path]:
+    """
+    Discover likely nested code project roots under a mixed-content folder.
+    """
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    marker_files = {
+        ".git",
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "Cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "Gemfile",
+        "composer.json",
+        "mix.exs",
+        "pubspec.yaml",
+        "CMakeLists.txt",
+        "Makefile",
+    }
+    code_exts = {
+        ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".c", ".cpp",
+        ".cc", ".cxx", ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt",
+    }
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dpath = Path(dirpath)
+
+        # Do not treat the top-level mixed folder itself as a nested candidate.
+        if dpath == root:
+            dirnames[:] = [d for d in dirnames if d not in COMMON_CODE_EXCLUDE_DIRS]
+            continue
+
+        dirnames[:] = [d for d in dirnames if d not in COMMON_CODE_EXCLUDE_DIRS]
+
+        has_marker = any(name in marker_files for name in filenames)
+        code_file_count = sum(1 for name in filenames if Path(name).suffix.lower() in code_exts)
+        if not has_marker and code_file_count < 3:
+            continue
+
+        key = str(dpath.resolve())
+        if key not in seen:
+            candidates.append(dpath.resolve())
+            seen.add(key)
+            if len(candidates) >= max_candidates:
+                break
+
+        # If current folder is a likely project root, skip descending into deeper
+        # children to avoid duplicate nested roots and extra scan cost.
+        dirnames[:] = []
+
+    return candidates
 
 
 def _startup_catchup_scan() -> None:

@@ -39,9 +39,16 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _write_json(path: Path, data: dict[str, Any]) -> None:
+def _write_json(path: Path, data: dict[str, Any]) -> bool:
     _ensure_home()
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return True
+    except PermissionError:
+        # Keep runtime operational even if local state file permissions are broken.
+        return False
+    except OSError:
+        return False
 
 
 def is_pid_running(pid: int | None) -> bool:

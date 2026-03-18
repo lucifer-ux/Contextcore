@@ -22,6 +22,17 @@ ContextCore gives you:
   - images
   - audio transcripts
   - video embeddings and video context
+  - codebase context (structure, symbols, dependencies, file-level detail)
+
+## Codebase Context for Claude/OpenCode
+
+ContextCore can expose your codebase context directly to MCP tools (for example, Claude Desktop and OpenCode) so the model can reason over your project without you pasting the entire directory into chat.
+
+Use the code modality during setup (`contextcore init`) and ContextCore will provide indexed codebase context through MCP tools such as:
+- `get_codebase_context`
+- `get_codebase_index`
+- `get_module_detail`
+- `get_file_content`
 
 ## Recommended Setup
 
