@@ -166,6 +166,26 @@ def serve(
     run_serve(port=port, reload=reload)
 
 
+@app.command(name="server")
+def server_cmd(
+    action: str = typer.Argument(..., help="Action to run: start, stop, restart, status."),
+    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+):
+    """
+    [bold]Manage the ContextCore background server.[/bold]
+
+    Use this command to start, stop, restart, or check server state.
+
+    Examples:
+      contextcore server start
+      contextcore server stop
+      contextcore server restart
+      contextcore server status
+    """
+    from cli.commands.helpers import run_server
+    run_server(action=action, port=port)
+
+
 # ── Entrypoint ─────────────────────────────────────────────────────────────────
 
 def main() -> None:

@@ -400,3 +400,58 @@ def run_serve(port: int = DEFAULT_PORT, reload: bool = False) -> None:
         error("ContextCore server exited with an error")
         console.print("  [dim]Retry in a clean terminal:[/dim] [bold]contextcore serve[/bold]")
         console.print("  [dim]If the backend still fails, run:[/dim] [bold]contextcore doctor[/bold]")
+
+
+def run_server(action: str, port: int = DEFAULT_PORT) -> None:
+    header()
+    mode = action.strip().lower()
+    valid_modes = {"start", "stop", "restart", "status"}
+
+    if mode not in valid_modes:
+        error(f"Unknown server action: {action}")
+        info("Use one of: start, stop, restart, status")
+        return
+
+    from cli.server import describe_port_conflict, ensure_server, is_server_running, stop_server
+
+    if mode == "status":
+        if is_server_running(port):
+            success(f"ContextCore server is running on port {port}")
+        else:
+            warning(f"ContextCore server is not running on port {port}")
+            conflict = describe_port_conflict(port)
+            if conflict:
+                info(conflict)
+                usage = get_port_usage(port)
+                pid = usage.get("pid")
+                if platform.system() == "Windows" and pid:
+                    console.print(f"  [dim]Stop conflicting process if appropriate:[/dim] [bold]taskkill /F /PID {pid}[/bold]")
+                elif pid:
+                    console.print(f"  [dim]Stop conflicting process if appropriate:[/dim] [bold]kill {pid}[/bold]")
+        return
+
+    if mode == "start":
+        if ensure_server(port=port, silent=False):
+            success(f"Server available on http://127.0.0.1:{port}")
+        return
+
+    if mode == "stop":
+        if stop_server(port=port):
+            success("ContextCore background server stopped")
+        elif is_server_running(port):
+            error("Could not stop the running server cleanly")
+            console.print("  [dim]Try again or run:[/dim] [bold]contextcore doctor[/bold]")
+        else:
+            info("Server is already stopped")
+        return
+
+    # restart
+    if is_server_running(port):
+        info("Stopping ContextCore server...")
+        if stop_server(port=port):
+            success("Server stopped")
+        else:
+            warning("Could not confirm stop. Attempting start anyway.")
+
+    if ensure_server(port=port, silent=False):
+        success(f"ContextCore server restarted on http://127.0.0.1:{port}")
