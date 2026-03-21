@@ -14,6 +14,7 @@ python -m venv .venv
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 pip install -e .
+
 ```
 
 This installs only the **lightweight base** — FastAPI, the MCP server, and the CLI.
