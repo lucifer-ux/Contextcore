@@ -16,6 +16,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+
 This installs only the **lightweight base** — FastAPI, the MCP server, and the CLI.
 Heavy ML models (torch, whisper) are downloaded later on-demand.
 
