@@ -289,29 +289,53 @@ def run_install(model: str) -> None:
 
 _TOOL_CONFIGS = {
     "claude-desktop": {
-        "windows": Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
+        "windows": [
+            Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
+            Path(os.environ.get("LOCALAPPDATA", "~")) / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json",
+        ],
         "darwin": Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
         "linux": Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
     },
     "claude-code": {
-        "windows": Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
-        "darwin": Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
-        "linux": Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
+        "windows": [
+            Path.home() / ".claude" / "config.json",
+            Path(os.environ.get("APPDATA", "~")) / "Claude Code" / "config.json",
+        ],
+        "darwin": Path.home() / ".claude" / "config.json",
+        "linux": Path.home() / ".claude" / "config.json",
     },
     "cline": {
-        "windows": Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "windows": [
+            Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+            Path.home() / "AppData" / "Roaming" / "Code - Insiders" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        ],
         "darwin": Path.home() / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
         "linux": Path.home() / ".config" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
     },
     "cursor": {
-        "windows": Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "windows": [
+            Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+            Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "settings" / "cline_mcp_settings.json",
+        ],
         "darwin": Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
         "linux": Path.home() / ".config" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
     },
     "opencode": {
-        "windows": Path.home() / ".config" / "opencode" / "opencode.json",
-        "darwin": Path.home() / ".config" / "opencode" / "opencode.json",
-        "linux": Path.home() / ".config" / "opencode" / "opencode.json",
+        "windows": [
+            Path.home() / ".opencode" / "config.json",
+            Path.home() / ".config" / "opencode" / "opencode.json",
+            Path.home() / ".config" / "opencode" / "opencode.jsonc",
+        ],
+        "darwin": [
+            Path.home() / ".opencode" / "config.json",
+            Path.home() / ".config" / "opencode" / "opencode.json",
+            Path.home() / ".config" / "opencode" / "opencode.jsonc",
+        ],
+        "linux": [
+            Path.home() / ".opencode" / "config.json",
+            Path.home() / ".config" / "opencode" / "opencode.json",
+            Path.home() / ".config" / "opencode" / "opencode.jsonc",
+        ],
     },
     "windsurf": {
         "windows": Path.home() / "AppData" / "Roaming" / "Windsurf" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
@@ -319,7 +343,11 @@ _TOOL_CONFIGS = {
         "linux": Path.home() / ".config" / "Windsurf" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
     },
     "continue": {
-        "windows": Path.home() / ".continue" / "config.json",
+        "windows": [
+            Path.home() / ".continue" / "config.json",
+            Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "continue.continue" / "config.json",
+            Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "continue.continue" / "config.json",
+        ],
         "darwin": Path.home() / ".continue" / "config.json",
         "linux": Path.home() / ".continue" / "config.json",
     },
@@ -345,11 +373,18 @@ def run_register(tool: str) -> None:
         info(f"Available: {', '.join(_TOOL_CONFIGS)}")
         return
 
-    cfg_file = cfg_paths[plat_key].expanduser()
+    raw_path = cfg_paths[plat_key]
+    candidates = raw_path if isinstance(raw_path, list) else [raw_path]
+    expanded = [Path(item).expanduser() for item in candidates]
+    existing = [item for item in expanded if item.exists()]
+    cfg_file = existing[0] if existing else expanded[0]
     console.print(f"  Registering ContextCore with [bold]{tool}[/bold]...")
     if not cfg_file.exists():
         error(f"Config file not found: {cfg_file}")
-        console.print("  Open the tool once to create its config file, then re-run this command.")
+        if key == "claude-code":
+            console.print("  [dim]Create the file if missing, then re-run:[/dim] [bold]contextcore register claude-code[/bold]")
+        else:
+            console.print("  Open the tool once to create its config file, then re-run this command.")
         return
 
     if _inject_mcp_config(cfg_file, tool):

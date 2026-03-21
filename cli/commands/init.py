@@ -44,29 +44,53 @@ _STYLE = Style([
 
 _TOOL_CONFIGS = {
     "Claude Desktop": {
-        "windows": Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
+        "windows": [
+            Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
+            Path(os.environ.get("LOCALAPPDATA", "~")) / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json",
+        ],
         "darwin":  Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
         "linux":   Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
     },
     "Claude Code": {
-        "windows": Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
-        "darwin":  Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
-        "linux":   Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
+        "windows": [
+            Path.home() / ".claude" / "config.json",
+            Path(os.environ.get("APPDATA", "~")) / "Claude Code" / "config.json",
+        ],
+        "darwin":  Path.home() / ".claude" / "config.json",
+        "linux":   Path.home() / ".claude" / "config.json",
     },
     "Cline (VS Code)": {
-        "windows": Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "windows": [
+            Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+            Path.home() / "AppData" / "Roaming" / "Code - Insiders" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        ],
         "darwin":  Path.home() / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
         "linux":   Path.home() / ".config" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
     },
     "Cursor": {
-        "windows": Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+        "windows": [
+            Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
+            Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "settings" / "cline_mcp_settings.json",
+        ],
         "darwin":  Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
         "linux":   Path.home() / ".config" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
     },
     "OpenCode": {
-        "windows": Path.home() / ".config" / "opencode" / "opencode.json",
-        "darwin":  Path.home() / ".config" / "opencode" / "opencode.json",
-        "linux":   Path.home() / ".config" / "opencode" / "opencode.json",
+        "windows": [
+            Path.home() / ".opencode" / "config.json",
+            Path.home() / ".config" / "opencode" / "opencode.json",
+            Path.home() / ".config" / "opencode" / "opencode.jsonc",
+        ],
+        "darwin": [
+            Path.home() / ".opencode" / "config.json",
+            Path.home() / ".config" / "opencode" / "opencode.json",
+            Path.home() / ".config" / "opencode" / "opencode.jsonc",
+        ],
+        "linux": [
+            Path.home() / ".opencode" / "config.json",
+            Path.home() / ".config" / "opencode" / "opencode.json",
+            Path.home() / ".config" / "opencode" / "opencode.jsonc",
+        ],
     },
     "Windsurf": {
         "windows": Path.home() / "AppData" / "Roaming" / "Windsurf" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
@@ -74,7 +98,11 @@ _TOOL_CONFIGS = {
         "linux":   Path.home() / ".config" / "Windsurf" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
     },
     "Continue (VS Code)": {
-        "windows": Path.home() / ".continue" / "config.json",
+        "windows": [
+            Path.home() / ".continue" / "config.json",
+            Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "continue.continue" / "config.json",
+            Path.home() / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "continue.continue" / "config.json",
+        ],
         "darwin":  Path.home() / ".continue" / "config.json",
         "linux":   Path.home() / ".continue" / "config.json",
     },
@@ -101,7 +129,12 @@ def _get_config_path(tool: str) -> Path | None:
     plat = _platform()
     paths = _TOOL_CONFIGS.get(tool, {})
     p = paths.get(plat)
-    return p.expanduser() if p else None
+    if p is None:
+        return None
+    candidates = p if isinstance(p, list) else [p]
+    expanded = [Path(item).expanduser() for item in candidates]
+    existing = [item for item in expanded if item.exists()]
+    return existing[0] if existing else (expanded[0] if expanded else None)
 
 
 def _inject_mcp_config(config_path: Path, tool_name: str) -> bool:
@@ -125,8 +158,23 @@ def _inject_mcp_config(config_path: Path, tool_name: str) -> bool:
             config_path.parent.mkdir(parents=True, exist_ok=True)
             data = {}
 
-        data.setdefault("mcpServers", {})
-        data["mcpServers"]["contextcore"] = mcp_entry
+        tool_key = tool_name.strip().lower()
+        if tool_key == "opencode":
+            data.setdefault("mcp", {})
+            if not isinstance(data["mcp"], dict):
+                data["mcp"] = {}
+            data["mcp"]["contextcore"] = {
+                "type": "local",
+                "command": [sys.executable, str(mcp_script)],
+                "environment": {
+                    "CONTEXTCORE_API_BASE_URL": DEFAULT_BACKEND_URL,
+                },
+            }
+            if isinstance(data.get("mcpServers"), dict):
+                data.pop("mcpServers", None)
+        else:
+            data.setdefault("mcpServers", {})
+            data["mcpServers"]["contextcore"] = mcp_entry
         config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return True
     except Exception as e:
@@ -734,6 +782,7 @@ def run_init() -> None:
         return
 
     registered: list[str] = []
+    selected_tools = [tool for tool in tools if tool != "none"]
     for tool in tools:
         if tool == "none":
             continue
@@ -747,7 +796,11 @@ def run_init() -> None:
             success(f"Found {tool} config")
         else:
             warning(f"{tool} config not found at {cfg_file}")
-            console.print(f"  [dim]If {tool} is installed, open it once to create the config, then run  contextcore register[/dim]")
+            if tool == "Claude Code":
+                console.print(f"  [dim]Create this file and add MCP config manually if needed:[/dim] [bold]{cfg_file}[/bold]")
+                console.print("  [dim]Then rerun:[/dim] [bold]contextcore register claude-code[/bold]")
+            else:
+                console.print(f"  [dim]If {tool} is installed, open it once to create the config, then run  contextcore register[/dim]")
             continue
 
         if _inject_mcp_config(cfg_file, tool):
@@ -811,8 +864,11 @@ def run_init() -> None:
     )
 
     # ── Done ──────────────────────────────────────────────────────────────────
+    prompt_tools = registered if registered else selected_tools
+    prompt_tool_names = [name.replace(" (VS Code)", "") for name in prompt_tools]
+    prompt_target = "/".join(prompt_tool_names) if prompt_tool_names else "your AI tool"
     done_panel([
-        'Try asking Claude: [bold cyan]"Search my documents for anything about project budgets"[/bold cyan]',
+        f'Try asking {prompt_target}: [bold cyan]"Search my documents for anything about project budgets"[/bold cyan]',
         "",
         f"Your index is building in the background.",
         "The background watcher stays active while ContextCore is running.",
