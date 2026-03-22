@@ -49,9 +49,19 @@ _TOOL_CONFIGS = {
         "linux":   Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
     },
     "Claude Code": {
-        "windows": Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
-        "darwin":  Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
-        "linux":   Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
+        "windows": [
+            Path.home() / ".claude.json",
+            Path.home() / ".claude" / "config.json",
+            Path(os.environ.get("APPDATA", "~")) / "Claude Code" / "config.json",
+        ],
+        "darwin":  [
+            Path.home() / ".claude.json",
+            Path.home() / ".claude" / "config.json",
+        ],
+        "linux":   [
+            Path.home() / ".claude.json",
+            Path.home() / ".claude" / "config.json",
+        ],
     },
     "Cline (VS Code)": {
         "windows": Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
@@ -78,6 +88,16 @@ _TOOL_CONFIGS = {
         "darwin":  Path.home() / ".continue" / "config.json",
         "linux":   Path.home() / ".continue" / "config.json",
     },
+}
+
+_REGISTER_TOOL_KEY_BY_LABEL = {
+    "Claude Desktop": "claude-desktop",
+    "Claude Code": "claude-code",
+    "Cline (VS Code)": "cline",
+    "Cursor": "cursor",
+    "OpenCode": "opencode",
+    "Windsurf": "windsurf",
+    "Continue (VS Code)": "continue",
 }
 
 _DEFAULT_CONFIG = get_default_config()
@@ -125,13 +145,74 @@ def _inject_mcp_config(config_path: Path, tool_name: str) -> bool:
             config_path.parent.mkdir(parents=True, exist_ok=True)
             data = {}
 
-        data.setdefault("mcpServers", {})
-        data["mcpServers"]["contextcore"] = mcp_entry
+        tool_key = tool_name.strip().lower()
+        if tool_key == "opencode":
+            data.setdefault("mcp", {})
+            if not isinstance(data["mcp"], dict):
+                data["mcp"] = {}
+            data["mcp"]["contextcore"] = {
+                "type": "local",
+                "command": [sys.executable, str(mcp_script)],
+                "environment": {
+                    "CONTEXTCORE_API_BASE_URL": DEFAULT_BACKEND_URL,
+                },
+            }
+            if isinstance(data.get("mcpServers"), dict):
+                data.pop("mcpServers", None)
+        elif tool_key in {"claude code", "claude-code"}:
+            data.setdefault("mcpServers", {})
+            if not isinstance(data["mcpServers"], dict):
+                data["mcpServers"] = {}
+            data["mcpServers"]["contextcore"] = {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": [str(mcp_script)],
+            }
+        else:
+            data.setdefault("mcpServers", {})
+            data["mcpServers"]["contextcore"] = mcp_entry
         config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return True
     except Exception as e:
         error(f"Failed to write {config_path}: {e}")
         return False
+
+
+def _register_tool_with_fallback(tool_label: str, *, dry_run: bool = False) -> bool:
+    tool_key = _REGISTER_TOOL_KEY_BY_LABEL.get(tool_label)
+    if not tool_key:
+        warning(f"Unknown registration target: {tool_label}")
+        return False
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    try:
+        from register_mcp import get_tool_definitions, register_tool
+        from detect_paths import get_mcp_server_path, get_python_path
+
+        python_path = get_python_path().get("path") or sys.executable
+        mcp_info = get_mcp_server_path()
+        mcp_path = mcp_info.get("path")
+        if not mcp_path:
+            warning(f"Could not resolve mcp_server.py for {tool_label}")
+            return False
+
+        tools = get_tool_definitions()
+        spec = tools.get(tool_key)
+        if not spec:
+            warning(f"Tool mapping not supported by register_mcp.py: {tool_key}")
+            return False
+
+        return bool(register_tool(tool_key, spec, python_path, mcp_path, dry_run=dry_run))
+
+    except Exception as exc:
+        warning(f"Auto-registration via register_mcp failed for {tool_label}: {exc}")
+        cfg_file = _get_config_path(tool_label)
+        if cfg_file is None:
+            return False
+        return _inject_mcp_config(cfg_file, tool_label)
 
 
 def _write_yaml_config(
@@ -501,14 +582,10 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
         ]
         tools = questionary.checkbox("Select tools", choices=tool_choices, style=_STYLE).ask() or []
         for tool in tools:
-            cfg_file = _get_config_path(tool)
-            if cfg_file and cfg_file.exists():
-                if _inject_mcp_config(cfg_file, tool):
-                    success(f"Updated MCP config for {tool}")
-                else:
-                    error(f"Could not update {tool} config. Run  contextcore doctor  for help.")
+            if _register_tool_with_fallback(tool):
+                success(f"Updated MCP config for {tool}")
             else:
-                warning(f"{tool} config not found. Run  contextcore register  after opening it once.")
+                error(f"Could not update {tool} config. Run  contextcore doctor  for help.")
 
     _start_server_and_scan(
         None,
@@ -734,28 +811,44 @@ def run_init() -> None:
         return
 
     registered: list[str] = []
-    for tool in tools:
-        if tool == "none":
-            continue
-        cfg_file = _get_config_path(tool)
-        if cfg_file is None:
-            warning(f"Could not determine config path for {tool}")
-            continue
-
+    selected_tools = [tool for tool in tools if tool != "none"]
+    for tool in selected_tools:
         console.print(f"\n  Connecting to [bold]{tool}[/bold]...")
-        if cfg_file.exists():
-            success(f"Found {tool} config")
-        else:
-            warning(f"{tool} config not found at {cfg_file}")
-            console.print(f"  [dim]If {tool} is installed, open it once to create the config, then run  contextcore register[/dim]")
-            continue
-
-        if _inject_mcp_config(cfg_file, tool):
+        if _register_tool_with_fallback(tool):
             success(f"Added ContextCore to {tool}")
             success("Config saved")
             registered.append(tool)
         else:
             error(f"Could not update {tool} config. Run  contextcore doctor  for help.")
+
+    if not selected_tools:
+        # Non-blocking auto registration for detected tools (if any).
+        try:
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            if str(repo_root) not in sys.path:
+                sys.path.insert(0, str(repo_root))
+            from register_mcp import detect_installed_tools, get_tool_definitions
+            from detect_paths import get_mcp_server_path, get_python_path
+
+            python_path = get_python_path().get("path") or sys.executable
+            mcp_path = get_mcp_server_path().get("path")
+            if mcp_path:
+                tools_def = get_tool_definitions()
+                detected = detect_installed_tools(tools_def)
+                if detected:
+                    info("No tools selected; attempting auto-registration for detected tools...")
+                    reverse = {v: k for k, v in _REGISTER_TOOL_KEY_BY_LABEL.items()}
+                    from register_mcp import register_tool
+
+                    for key in detected:
+                        spec = tools_def.get(key)
+                        if not spec:
+                            continue
+                        if register_tool(key, spec, python_path, mcp_path, dry_run=False):
+                            label = reverse.get(key, key)
+                            registered.append(label)
+        except Exception as exc:
+            warning(f"Auto-registration skipped: {exc}")
 
     if registered:
         console.print()

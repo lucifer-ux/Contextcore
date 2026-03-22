@@ -209,6 +209,15 @@ contextcore serve
 
 By default, ContextCore uses port `8000`.
 
+Background server shortcuts:
+
+```powershell
+contextcore start
+contextcore stop
+contextcore restart
+contextcore server status
+```
+
 ### Diagnose setup problems
 
 ```powershell
@@ -222,6 +231,15 @@ contextcore register claude-desktop
 contextcore register claude-code
 contextcore register cursor
 contextcore register cline
+```
+
+Or use the standalone registrar script:
+
+```bash
+python register_mcp.py --list
+python register_mcp.py --tool claude-code
+python register_mcp.py --dry-run
+python register_mcp.py --all
 ```
 
 ### Install optional model stacks manually
@@ -288,6 +306,71 @@ After changing Claude config:
 - fully quit Claude Desktop
 - start the backend if it is not already running
 - reopen Claude Desktop
+
+## Claude Code Setup
+
+Claude Code user config path:
+
+```text
+~/.claude.json
+```
+
+If you do not see ContextCore under `/mcp`, add this manually:
+
+```json
+{
+  "mcpServers": {
+    "contextcore": {
+      "type": "stdio",
+      "command": "/Users/<you>/.contextcore/.venv/bin/python",
+      "args": [
+        "/Users/<you>/.contextcore/mcp_server.py"
+      ]
+    }
+  }
+}
+```
+
+Typical values by OS:
+- macOS/Linux `command`: `/Users/<you>/.contextcore/.venv/bin/python`
+- macOS/Linux `args[0]`: `/Users/<you>/.contextcore/mcp_server.py`
+- Windows `command`: `C:\\Users\\<you>\\.contextcore\\.venv\\Scripts\\python.exe`
+- Windows `args[0]`: `C:\\Users\\<you>\\.contextcore\\mcp_server.py`
+
+To get exact values from your machine:
+
+```bash
+cd ~/.contextcore
+echo "python: $(pwd)/.venv/bin/python"
+echo "mcp_server: $(pwd)/mcp_server.py"
+```
+
+Windows PowerShell:
+
+```powershell
+Set-Location $env:USERPROFILE\.contextcore
+Write-Host "python: $((Get-Location).Path)\.venv\Scripts\python.exe"
+Write-Host "mcp_server: $((Get-Location).Path)\mcp_server.py"
+```
+
+Then:
+- ensure backend is running (`contextcore status` should show port 8000)
+- restart Claude Code completely
+- run `/mcp` again inside Claude Code
+
+Deterministic path detection (recommended):
+
+```bash
+python detect_paths.py
+python detect_paths.py --json
+python detect_paths.py --mcp-config
+python detect_paths.py --claude-json
+python detect_paths.py --shell
+python detect_paths.py --validate
+```
+
+This script resolves Python and `mcp_server.py` deterministically and validates
+that your environment is usable before you paste config values.
 
 ## Backend Health Check
 
@@ -375,12 +458,15 @@ Cause:
 - Claude is using a different Python environment than the backend
 - Claude config points at the wrong `python.exe`
 - `cwd` is missing or wrong
+- for Claude Code, MCP entry is missing from `~/.claude.json`
 
 Fix:
 - use the same venv in both places
 - update Claude config `command`
 - add `cwd`
 - restart Claude Desktop fully
+- in Claude Code, run `/mcp` and confirm `contextcore` is listed
+- if `/mcp` is empty, add the `mcpServers.contextcore` entry shown in **Claude Code Setup**
 
 ### 4. Video says `missing ffmpeg`
 

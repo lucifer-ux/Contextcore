@@ -83,6 +83,7 @@ def _default_candidates(tool: str) -> list[Path]:
         ]
     if tool == "claude-code":
         return [
+            userprofile / ".claude.json",
             userprofile / ".claude" / "config.json",
             appdata / "Claude Code" / "config.json",
         ]

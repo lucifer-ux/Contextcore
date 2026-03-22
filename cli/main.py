@@ -186,6 +186,39 @@ def server_cmd(
     run_server(action=action, port=port)
 
 
+@app.command(name="start")
+def start_cmd(
+    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+):
+    """
+    [bold]Start the ContextCore background server.[/bold]
+    """
+    from cli.commands.helpers import run_server
+    run_server(action="start", port=port)
+
+
+@app.command(name="stop")
+def stop_cmd(
+    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+):
+    """
+    [bold]Stop the ContextCore background server.[/bold]
+    """
+    from cli.commands.helpers import run_server
+    run_server(action="stop", port=port)
+
+
+@app.command(name="restart")
+def restart_cmd(
+    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+):
+    """
+    [bold]Restart the ContextCore background server.[/bold]
+    """
+    from cli.commands.helpers import run_server
+    run_server(action="restart", port=port)
+
+
 # ── Entrypoint ─────────────────────────────────────────────────────────────────
 
 def main() -> None:

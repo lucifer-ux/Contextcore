@@ -153,6 +153,8 @@ def run_index(target: str | None = None) -> None:
 
 
 def run_add_folder(path: str, index_now: bool = True) -> None:
+    from cli.server import ensure_server
+
     header()
     folder = Path(path).expanduser().resolve()
     if not folder.exists() or not folder.is_dir():
@@ -294,9 +296,19 @@ _TOOL_CONFIGS = {
         "linux": Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
     },
     "claude-code": {
-        "windows": Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json",
-        "darwin": Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
-        "linux": Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
+        "windows": [
+            Path.home() / ".claude.json",
+            Path.home() / ".claude" / "config.json",
+            Path(os.environ.get("APPDATA", "~")) / "Claude Code" / "config.json",
+        ],
+        "darwin": [
+            Path.home() / ".claude.json",
+            Path.home() / ".claude" / "config.json",
+        ],
+        "linux": [
+            Path.home() / ".claude.json",
+            Path.home() / ".claude" / "config.json",
+        ],
     },
     "cline": {
         "windows": Path.home() / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json",
@@ -327,38 +339,69 @@ _TOOL_CONFIGS = {
 
 
 def run_register(tool: str) -> None:
-    from cli.commands.init import _inject_mcp_config
-
     header()
     key = tool.lower().strip().replace(" ", "-")
+    alias_map = {
+        "claude-desktop": "claude-desktop",
+        "claude-desktop-app": "claude-desktop",
+        "claude-code": "claude-code",
+        "cline": "cline",
+        "cursor": "cursor",
+        "opencode": "opencode",
+        "windsurf": "windsurf",
+        "continue": "continue",
+        "continue-dev": "continue",
+        "roo-code": "roo-code",
+        "roocode": "roo-code",
+    }
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    try:
+        from register_mcp import detect_installed_tools, get_tool_definitions, register_tool
+        from detect_paths import get_mcp_server_path, get_python_path
+    except Exception as exc:
+        error(f"Could not load MCP registration helpers: {exc}")
+        console.print("  [dim]Try reinstalling ContextCore and rerun this command.[/dim]")
+        return
+
+    tools = get_tool_definitions()
+
     if key == "list" or not key:
-        info(f"Available tools: {', '.join(_TOOL_CONFIGS)}")
+        detected = set(detect_installed_tools(tools))
+        info("Available tools:")
+        for t in sorted(tools.keys()):
+            mark = "detected" if t in detected else "not found"
+            console.print(f"  - [bold]{t}[/bold] ({mark})")
         return
 
-    plat_key = platform.system().lower()
-    if plat_key not in ("windows", "darwin", "linux"):
-        plat_key = "linux"
-
-    cfg_paths = _TOOL_CONFIGS.get(key)
-    if not cfg_paths:
+    tool_key = alias_map.get(key)
+    if not tool_key or tool_key not in tools:
         error(f"Unknown tool: {tool}")
-        info(f"Available: {', '.join(_TOOL_CONFIGS)}")
+        info(f"Available: {', '.join(sorted(tools.keys()))}")
         return
 
-    cfg_file = cfg_paths[plat_key].expanduser()
-    console.print(f"  Registering ContextCore with [bold]{tool}[/bold]...")
-    if not cfg_file.exists():
-        error(f"Config file not found: {cfg_file}")
-        console.print("  Open the tool once to create its config file, then re-run this command.")
+    python_path = get_python_path().get("path") or sys.executable
+    mcp_info = get_mcp_server_path()
+    mcp_path = mcp_info.get("path")
+    if not mcp_path:
+        error("mcp_server.py not found. Is ContextCore installed correctly?")
+        detail = mcp_info.get("error")
+        if detail:
+            console.print(f"  [dim]{detail}[/dim]")
         return
 
-    if _inject_mcp_config(cfg_file, tool):
-        success(f"ContextCore added to {tool}")
-        success(f"Config updated: {cfg_file}")
+    spec = tools[tool_key]
+    console.print(f"  Registering ContextCore with [bold]{spec['display_name']}[/bold]...")
+    ok = register_tool(tool_key, spec, python_path, mcp_path, dry_run=False)
+    if ok:
+        success(f"ContextCore added to {spec['display_name']}")
         console.print()
-        console.print(f"  [bold yellow]Restart {tool}[/bold yellow] for the changes to take effect.")
+        console.print(f"  [bold yellow]Restart {spec['display_name']}[/bold yellow] for the changes to take effect.")
     else:
-        error(f"Failed to update {tool} config. Run  contextcore doctor  for help.")
+        error(f"Failed to update {spec['display_name']} config. Run  contextcore doctor  for help.")
 
 
 def run_serve(port: int = DEFAULT_PORT, reload: bool = False) -> None:
