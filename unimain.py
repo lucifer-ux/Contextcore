@@ -663,48 +663,56 @@ def scan_image_index(target_dir: str | Path | None = None):
             "reason": f"transformers not installed; run: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers",
             "new_vectors": 0,
         }
-    init_image_meta_db()
-    known     = get_known_images()
-    new_count = 0
-    next_aid  = get_next_annoy_id()
-    exts      = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
+
+    try:
+        from image_search_implementation_v2.db import get_conn, init_db
+        from image_search_implementation_v2.index_worker import IMAGE_EXTS, finalize_indexing, index_file
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": f"image_v2_import_failed: {e}",
+            "new_vectors": 0,
+        }
+
+    init_db()
+    conn = get_conn()
+    before_count = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
+    conn.close()
+
     scan_roots = [Path(target_dir).expanduser().resolve()] if target_dir else get_watch_directories()
+    scanned = 0
+    failed = 0
+    skip_dirs = {".venv", "venv", "__pycache__", "node_modules", ".git", ".hg", ".svn"}
 
     for scan_root in scan_roots:
         for p in scan_root.rglob("*"):
-            if not p.is_file() or p.suffix.lower() not in exts:
+            if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
                 continue
+            if any(part in skip_dirs for part in p.parts):
+                continue
+            scanned += 1
             try:
-                mtime = p.stat().st_mtime
-            except Exception:
-                continue
-            s    = str(p)
-            info = known.get(s)
-            if info and abs(info["mtime"] - mtime) < 0.001:
-                continue
-            try:
-                vec = embed_image_file(p)
+                ok = bool(index_file(p))
+                if not ok:
+                    failed += 1
             except Exception as e:
-                print("⚠️ embed failed:", e)
-                continue
-            try:
-                import numpy as np
-                np.save(str(IMAGE_EMBED_DIR / f"{next_aid}.npy"), vec)
-            except Exception as e:
-                print("⚠️ save failed:", e)
-                continue
-            add_or_update_image(s, mtime, next_aid)
-            next_aid  += 1
-            new_count += 1
+                failed += 1
+                print("image-v2 index failed:", p, e)
 
-    if new_count > 0:
-        global _annoy_needs_rebuild
-        _annoy_needs_rebuild = True
-        threading.Thread(
-            target=lambda: rebuild_annoy_index(all_vectors_iterator), daemon=True
-        ).start()
+    conn = get_conn()
+    after_count = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
+    conn.close()
+    new_count = max(0, after_count - before_count)
+    annoy_sync = finalize_indexing(rebuild=True)
 
-    return {"status": "ok", "new_vectors": new_count}
+    return {
+        "status": "ok",
+        "engine": "annoy_sqlite_ocr",
+        "new_vectors": int(new_count),
+        "scanned_images": int(scanned),
+        "failed_images": int(failed),
+        "annoy": annoy_sync,
+    }
 
 
 def scan_video_index_wrapper(target_dir: str | None = None):
@@ -2275,7 +2283,7 @@ def run_text_search(
         return {"error": str(e)}
 
 
-def run_image_search(query: str, top_k: int = 10):
+def _run_image_search_legacy(query: str, top_k: int = 10):
     try:
         init_image_meta_db()
         if not ensure_annoy_loaded():
@@ -2306,10 +2314,64 @@ def run_image_search(query: str, top_k: int = 10):
                     "score":    float(1.0 - dist / 2.0),
                 })
         conn.close()
-        return {"hits": results[:2]}
+        return {"hits": results[:max(1, int(top_k))]}
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
+
+
+def _image_v2_capabilities() -> dict[str, Any]:
+    ocr_pkg = importlib.util.find_spec("pytesseract") is not None
+    ocr_bin = shutil.which("tesseract") is not None
+
+    annoy_installed = False
+    annoy_ready = False
+    annoy_needs_rebuild = False
+    try:
+        from image_search_implementation_v2.annoy_store import get_annoy_status
+
+        annoy_status = get_annoy_status()
+        annoy_installed = bool(annoy_status.get("installed"))
+        annoy_ready = bool(annoy_status.get("ready"))
+        annoy_needs_rebuild = bool(annoy_status.get("needs_rebuild"))
+    except Exception:
+        pass
+
+    return {
+        "ocr_available": bool(ocr_pkg and ocr_bin),
+        "ocr_package_installed": bool(ocr_pkg),
+        "ocr_binary_installed": bool(ocr_bin),
+        "annoy_installed": annoy_installed,
+        "annoy_ready": annoy_ready,
+        "annoy_needs_rebuild": annoy_needs_rebuild,
+        "semantic_backend_available": bool(annoy_ready),
+        "semantic_backend": "annoy_sqlite",
+    }
+
+
+def run_image_search(query: str, top_k: int = 10):
+    bounded_top_k = max(1, min(int(top_k), 50))
+
+    try:
+        from image_search_implementation_v2.db import init_db
+        from image_search_implementation_v2.search import search as image_search_v2
+
+        init_db()
+        hits = image_search_v2(query, top_k=bounded_top_k)
+        if not isinstance(hits, list):
+            hits = []
+        return {
+            "hits": hits[:bounded_top_k],
+            "engine": "annoy_sqlite_ocr",
+            "capabilities": _image_v2_capabilities(),
+        }
+    except Exception as e:
+        traceback.print_exc()
+        return {
+            "error": "image_v2_unavailable",
+            "detail": str(e),
+            "capabilities": _image_v2_capabilities(),
+        }
 
 
 def run_video_search(query: str, top_k: int = 10):
@@ -3264,16 +3326,41 @@ def get_file_content_api(
 # ── /image/index/status ───────────────────────────────────────
 @app.get("/image/index/status")
 def image_index_status():
-    init_image_meta_db()
-    conn = _get_image_conn()
-    cnt  = conn.execute(
-        "SELECT COUNT(*) as c FROM images WHERE annoy_id IS NOT NULL"
-    ).fetchone()[0]
-    conn.close()
+    indexed_images = 0
+    indexed_images_with_ocr = 0
+    capabilities = _image_v2_capabilities()
+    status = "ok"
+    annoy_status: dict[str, Any] = {
+        "installed": False,
+        "index_exists": False,
+        "needs_rebuild": False,
+        "vector_ready_images": 0,
+        "ready": False,
+    }
+
+    try:
+        from image_search_implementation_v2.annoy_store import get_annoy_status
+        from image_search_implementation_v2.db import count_images, count_ocr_images, init_db
+
+        init_db()
+        indexed_images = int(count_images())
+        indexed_images_with_ocr = int(count_ocr_images())
+        annoy_status = get_annoy_status()
+    except Exception as e:
+        status = "degraded"
+        capabilities["error"] = str(e)
+
+    ocr_coverage = float(indexed_images_with_ocr / indexed_images) if indexed_images else 0.0
     return {
-        "annoy_exists":        ANNOY_INDEX_PATH.exists(),
-        "indexed_images":      int(cnt),
-        "annoy_needs_rebuild": bool(_annoy_needs_rebuild),
+        "status": status,
+        "engine": "annoy_sqlite_ocr",
+        "indexed_images": indexed_images,
+        "indexed_images_with_ocr": indexed_images_with_ocr,
+        "ocr_coverage": round(ocr_coverage, 4),
+        "capabilities": capabilities,
+        "annoy": annoy_status,
+        "annoy_exists": bool(annoy_status.get("index_exists")),
+        "annoy_needs_rebuild": bool(annoy_status.get("needs_rebuild")),
     }
 
 

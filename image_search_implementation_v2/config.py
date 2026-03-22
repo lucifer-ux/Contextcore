@@ -15,14 +15,18 @@ DATA_DIR = Path(__file__).parent / "storage"
 DATA_DIR.mkdir(exist_ok=True)
 
 DB_PATH = DATA_DIR / "images_v2.db"
-
-# Qdrant config - adjust if your qdrant server binds elsewhere
+EMBEDDINGS_DIR = DATA_DIR / "embeddings"
+EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
+ANNOY_INDEX_PATH = DATA_DIR / "annoy_index.ann"
+ANNOY_STATE_PATH = DATA_DIR / "annoy_state.json"
+# Deprecated (kept only for compatibility with unused legacy modules)
 QDRANT_URL = "http://127.0.0.1:6333"
 QDRANT_COLLECTION = "images_v2"
 
 # Embedding model name (CLIP). This model will be loaded only in workers.
 CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"  # reliable baseline; can swap later
 VECTOR_DIM = 512
+ANNOY_N_TREES = 12
 
 # indexing / search tunables
 ANN_TOPK = 50

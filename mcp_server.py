@@ -733,12 +733,21 @@ def search(
     def _shape_images(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for r in rows:
+            final_score = float(r.get("final_score", r.get("score", 0.0)))
             out.append(
                 {
                     "modality": "image",
                     "source": r.get("path"),
                     "filename": r.get("filename"),
-                    "score": float(r.get("score", 0.0)),
+                    "score": final_score,
+                    "final_score": final_score,
+                    "semantic_score": float(r.get("semantic_score", 0.0)),
+                    "ocr_score": float(r.get("ocr_score", 0.0)),
+                    "filename_score": float(r.get("filename_score", 0.0)),
+                    "match_type": r.get("match_type"),
+                    "ocr_text": r.get("ocr_text", ""),
+                    "ocr_snippet": r.get("ocr_snippet", ""),
+                    "capabilities": r.get("capabilities", {}),
                 }
             )
         return out
@@ -834,15 +843,63 @@ def fetch_content(
     if modality == "video":
         return _fetch_video_content(str(p))
     elif modality == "image":
+        return _fetch_image_content(str(p))
+    else:
+        return _fetch_text_content(str(p))
+
+
+def _fetch_image_content(image_path: str) -> dict[str, Any]:
+    """Retrieve indexed OCR context for an image when available."""
+    try:
+        image_db = PROJECT_ROOT / "image_search_implementation_v2" / "storage" / "images_v2.db"
+        if not image_db.exists():
+            return {
+                "ok": True,
+                "modality": "image",
+                "path": image_path,
+                "filename": Path(image_path).name,
+                "ocr_text": "",
+                "ocr_available": False,
+                "next_step": "Use prepare_file_for_tool to access this image.",
+            }
+
+        conn = sqlite3.connect(str(image_db))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT
+                i.filename,
+                COALESCE(i.ocr_text, '') AS ocr_text
+            FROM images i
+            WHERE i.path = ?
+            """,
+            (image_path,),
+        ).fetchone()
+        conn.close()
+
+        if not row:
+            return {
+                "ok": True,
+                "modality": "image",
+                "path": image_path,
+                "filename": Path(image_path).name,
+                "ocr_text": "",
+                "ocr_available": False,
+                "next_step": "Use prepare_file_for_tool to access this image.",
+            }
+
+        ocr_text = (row["ocr_text"] or "").strip()
         return {
             "ok": True,
             "modality": "image",
-            "path": str(p),
-            "filename": p.name,
+            "path": image_path,
+            "filename": row["filename"] or Path(image_path).name,
+            "ocr_text": ocr_text[:3000],
+            "ocr_available": bool(ocr_text),
             "next_step": "Use prepare_file_for_tool to access this image.",
         }
-    else:
-        return _fetch_text_content(str(p))
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def _fetch_video_content(video_path: str) -> dict[str, Any]:
@@ -1228,13 +1285,13 @@ def list_sources() -> dict[str, Any]:
     video_total = _safe_sql_count(video_db, "SELECT COUNT(*) FROM videos")
 
     image_status = _request_json("GET", "/image/index/status", timeout=10)
-    qdrant_status: dict[str, Any] = {}
+    image_index_status: dict[str, Any] = {}
+    semantic_available = False
     if image_status.get("ok"):
-        qdrant_status = {
-            "annoy_exists": image_status["data"].get("annoy_exists"),
-            "indexed_images_annoy": image_status["data"].get("indexed_images"),
-            "annoy_needs_rebuild": image_status["data"].get("annoy_needs_rebuild"),
-        }
+        image_index_status = dict(image_status["data"])
+        semantic_available = bool(
+            image_index_status.get("capabilities", {}).get("semantic_backend_available")
+        )
 
     return {
         "ok": True,
@@ -1243,7 +1300,7 @@ def list_sources() -> dict[str, Any]:
             "folders": folders_cfg,
             "connectors": {
                 "filesystem": True,
-                "qdrant": bool(qdrant_status),
+                "annoy": semantic_available,
                 "rclone": True,
             },
         },
@@ -1256,7 +1313,7 @@ def list_sources() -> dict[str, Any]:
         },
         "backend": {
             "base_url": BACKEND_BASE_URL,
-            "image_index_status": qdrant_status,
+            "image_index_status": image_index_status,
         },
     }
 

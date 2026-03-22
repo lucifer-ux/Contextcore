@@ -23,6 +23,7 @@ dependencies = [
     "numpy",
     "Pillow",
     "rapidfuzz",
+    "annoy",
     "openpyxl",
     "xlrd",
     "odfpy",

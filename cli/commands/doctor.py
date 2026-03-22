@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import platform
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -201,6 +202,33 @@ def run_doctor() -> None:
     except ImportError:
         warning("faster-whisper not installed - audio search unavailable")
         hint("install audio model", "contextcore install audio")
+
+    section("Image Search Capabilities")
+    try:
+        import pytesseract  # noqa: F401
+        success("pytesseract installed (OCR Python package available)")
+    except ImportError:
+        warning("pytesseract not installed - OCR text extraction disabled")
+        hint("install OCR package", f"{sys.executable} -m pip install pytesseract")
+
+    tesseract_ok = bool(shutil.which("tesseract"))
+    if tesseract_ok:
+        success("tesseract binary found (OCR runtime available)")
+    else:
+        warning("tesseract binary not found - OCR text extraction disabled")
+        if platform.system() == "Windows":
+            hint("install tesseract", "winget install UB-Mannheim.TesseractOCR")
+        elif platform.system() == "Darwin":
+            hint("install tesseract", "brew install tesseract")
+        else:
+            hint("install tesseract", "sudo apt-get install tesseract-ocr")
+
+    try:
+        import annoy  # noqa: F401
+        success("annoy installed (semantic image ANN backend available)")
+    except ImportError:
+        warning("annoy not installed - semantic image search disabled (OCR/filename still works)")
+        hint("install annoy", f"{sys.executable} -m pip install annoy")
 
     console.print()
     if issues == 0:

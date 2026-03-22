@@ -18,6 +18,7 @@ watchdog
 pypdf
 numpy
 rapidfuzz
+annoy
 
 # Document file formats
 openpyxl

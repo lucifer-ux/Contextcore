@@ -249,6 +249,34 @@ def test_mcp_video_shaping():
 
 test("MCP video results include description + timestamp", test_mcp_video_shaping)
 
+def test_mcp_image_shaping():
+    with open("mcp_server.py", "r", encoding="utf-8") as f:
+        content = f.read()
+    assert '"match_type"' in content, "image match_type missing"
+    assert '"ocr_text"' in content, "image ocr_text missing"
+    assert '"ocr_snippet"' in content, "image ocr_snippet missing"
+
+test("MCP image results include OCR + match metadata", test_mcp_image_shaping)
+
+def test_unimain_image_annoy_sqlite_wiring():
+    with open("unimain.py", "r", encoding="utf-8") as f:
+        content = f.read()
+    assert "image_search_implementation_v2.search" in content, "v2 image search not wired"
+    assert '"engine": "annoy_sqlite_ocr"' in content, "Annoy+SQLite image status marker missing"
+    assert '"semantic_backend": "annoy_sqlite"' in content, "semantic backend marker missing"
+
+test("unimain image search/status wired to Annoy+SQLite", test_unimain_image_annoy_sqlite_wiring)
+
+def test_image_search_score_components():
+    with open("image_search_implementation_v2/search.py", "r", encoding="utf-8") as f:
+        content = f.read()
+    assert '"semantic_score"' in content, "semantic_score missing in image results"
+    assert '"ocr_score"' in content, "ocr_score missing in image results"
+    assert '"filename_score"' in content, "filename_score missing in image results"
+    assert '"final_score"' in content, "final_score missing in image results"
+
+test("image search emits merged score components", test_image_search_score_components)
+
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 8 — requirements.txt

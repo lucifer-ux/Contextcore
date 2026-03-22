@@ -20,6 +20,7 @@ setup(
         "fastapi",
         "uvicorn",
         "requests",
+        "annoy",
     ],
     python_requires=">=3.10",
 )

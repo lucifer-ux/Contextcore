@@ -146,6 +146,36 @@ def t_mcp_video_shape():
     assert '"best_timestamp"' in c
 test("MCP video results have description+timestamp", t_mcp_video_shape)
 
+def t_mcp_image_shape_ocr():
+    c = open("mcp_server.py", "r", encoding="utf-8").read()
+    assert '"match_type"' in c
+    assert '"ocr_text"' in c
+    assert '"ocr_snippet"' in c
+test("MCP image results include OCR + match metadata", t_mcp_image_shape_ocr)
+
+def t_image_search_annoy_sqlite_wired():
+    c = open("unimain.py", "r", encoding="utf-8").read()
+    assert "image_search_implementation_v2.search" in c
+    assert "annoy_sqlite_ocr" in c
+    assert "semantic_backend\": \"annoy_sqlite\"" in c
+test("unimain image search is wired to Annoy+SQLite runtime", t_image_search_annoy_sqlite_wired)
+
+def t_image_status_annoy_fields():
+    c = open("unimain.py", "r", encoding="utf-8").read()
+    assert '"indexed_images_with_ocr"' in c
+    assert '"ocr_coverage"' in c
+    assert '"engine": "annoy_sqlite_ocr"' in c
+    assert '"annoy_needs_rebuild"' in c
+test("image index status exposes Annoy+OCR fields", t_image_status_annoy_fields)
+
+def t_image_result_score_fields():
+    c = open("image_search_implementation_v2/search.py", "r", encoding="utf-8").read()
+    assert '"semantic_score"' in c
+    assert '"ocr_score"' in c
+    assert '"filename_score"' in c
+    assert '"final_score"' in c
+test("image search emits merged score components", t_image_result_score_fields)
+
 # ---- STEP 8: Requirements ----
 def t_requirements():
     c = open("requirements.txt", "r", encoding="utf-8").read()
