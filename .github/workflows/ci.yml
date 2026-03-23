@@ -163,8 +163,6 @@ jobs:
         run: |
           python -c "
           import annoy
-          print('annoy version:', annoy.__version__)
-          # Quick sanity: create and query a tiny index
           import numpy as np
           ai = annoy.AnnoyIndex(512, 'angular')
           for i in range(5):
