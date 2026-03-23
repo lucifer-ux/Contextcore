@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Unified local search and indexing for Claude and other AI tools"
 requires-python = ">=3.10"
 
-# Lightweight base deps only — heavy ML libs are installed via 'contextcore install'
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
@@ -30,15 +29,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Install these separately (large downloads)
 vision = ["torch", "torchvision", "transformers"]
 audio  = ["faster-whisper"]
 all    = ["torch", "torchvision", "transformers", "faster-whisper"]
+dev = [
+    "pytest",
+    "pytest-timeout",
+]
 
 [project.scripts]
-# This is what makes 'contextcore' work as a global command
 contextcore = "cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cli*", "core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+filterwarnings = ["ignore::pytest.PytestConfigWarning"]

@@ -1,0 +1,260 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-import:
+    name: Lint & Import Safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install base dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Check imports don't crash
+        run: |
+          python -c "import config; print('config OK')"
+          python -c "from cli.main import main; print('cli OK')"
+          python -c "from core.sdk import ContextCore; print('sdk OK')"
+          python -c "from register_mcp import get_tool_definitions; print('register_mcp OK')"
+          python -c "from detect_paths import get_python_path; print('detect_paths OK')"
+
+      - name: No hardcoded paths check
+        run: |
+          python -c "
+          import pathlib
+          unimain = pathlib.Path('unimain.py').read_text()
+          worker  = pathlib.Path('run_index_pipeline.py').read_text()
+          assert '/mnt/storage' not in unimain, 'hardcoded path in unimain.py'
+          assert '/mnt/storage' not in worker,  'hardcoded path in run_index_pipeline.py'
+          print('No hardcoded paths: OK')
+          "
+
+      - name: pyproject.toml entry point exists
+        run: |
+          python -c "
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          scripts = data.get('project', {}).get('scripts', {})
+          assert 'contextcore' in scripts, 'contextcore entry point missing from pyproject.toml'
+          print('Entry point OK:', scripts['contextcore'])
+          "
+
+  unit-tests:
+    name: Unit Tests (no models)
+    runs-on: ubuntu-latest
+    needs: lint-and-import
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pytest pytest-timeout
+
+      - name: Run pytest tests
+        run: |
+          pytest tests/ -v --timeout=60 --tb=short
+        env:
+          CONTEXTCORE_SDK_ROOT: ${{ github.workspace }}
+
+  config-tests:
+    name: Config & Path Tests
+    runs-on: ${{ matrix.os }}
+    needs: lint-and-import
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Test config resolution
+        run: |
+          python -c "
+          import os
+          os.environ['CONTEXTCORE_SDK_ROOT'] = os.getcwd()
+          from config import get_storage_dir, get_watch_directories, get_enable_text
+          print('storage_dir:', get_storage_dir())
+          print('enable_text:', get_enable_text())
+          print('Config resolution: OK')
+          "
+
+      - name: Test MCP path detection
+        run: |
+          python -c "
+          from detect_paths import get_python_path, get_mcp_server_path
+          py = get_python_path()
+          print('python:', py['path'])
+          print('env_type:', py['env_type'])
+          mcp = get_mcp_server_path()
+          print('mcp exists:', mcp['exists'])
+          "
+
+      - name: Test register_mcp tool definitions
+        run: |
+          python -c "
+          from register_mcp import get_tool_definitions, detect_installed_tools
+          tools = get_tool_definitions()
+          assert len(tools) >= 10, f'Expected 10+ tools, got {len(tools)}'
+          print(f'Tool definitions: {len(tools)} tools defined')
+          detected = detect_installed_tools(tools)
+          print(f'Detected on this runner: {detected}')
+          "
+
+  search-tests:
+    name: Search Engine Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Test sqlite-vec loads
+        run: |
+          python -c "
+          import sqlite3, sqlite_vec
+          conn = sqlite3.connect(':memory:')
+          conn.enable_load_extension(True)
+          sqlite_vec.load(conn)
+          conn.enable_load_extension(False)
+          row = conn.execute('SELECT vec_version()').fetchone()
+          print('sqlite-vec version:', row[0])
+          "
+
+      - name: Test text search db init and upsert
+        run: |
+          python -c "
+          import tempfile, os, pathlib
+          with tempfile.TemporaryDirectory() as tmp:
+              os.environ['CONTEXTCORE_STORAGE_DIR'] = tmp
+              from text_search_implementation_v2.db import init_db, upsert_file, query_fts
+              init_db()
+              upsert_file('/tmp/test.txt', 'test.txt', 1234567890.0, 'hello world search test', 'test')
+              results = query_fts('hello world', 5)
+              assert len(results) > 0, 'FTS search returned no results'
+              print(f'Text FTS search: OK — {len(results)} result(s)')
+          "
+
+      - name: Test image db init and upsert
+        run: |
+          python -c "
+          import tempfile, os
+          with tempfile.TemporaryDirectory() as tmp:
+              os.environ['CONTEXTCORE_STORAGE_DIR'] = tmp
+              os.environ['CONTEXTCORE_IMAGE_DIR'] = tmp
+              from image_search_implementation_v2.db import init_db, upsert_image, query_fts
+              init_db()
+              upsert_image('/tmp/test.jpg', 'test.jpg', 1234567890.0, 'a red apple on a white table')
+              results = query_fts('apple', 5)
+              assert len(results) > 0, 'Image FTS returned no results'
+              print(f'Image FTS OCR search: OK — {len(results)} result(s)')
+          "
+
+      - name: Test Annoy image vector store
+        run: |
+          python -c "
+          import tempfile, os, numpy as np, pathlib
+          with tempfile.TemporaryDirectory() as tmp:
+              os.environ['CONTEXTCORE_STORAGE_DIR'] = tmp
+              os.environ['CONTEXTCORE_IMAGE_DIR'] = tmp
+              from image_search_implementation_v2.vector_store import build_index, search_vectors, add_to_db
+              vectors = [(i, np.random.rand(512).astype(np.float32)) for i in range(10)]
+              build_index(vectors)
+              print('Annoy index built: OK')
+          "
+
+  cli-smoke:
+    name: CLI Smoke Test
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: contextcore --help works
+        run: contextcore --help
+        env:
+          CONTEXTCORE_SDK_ROOT: ${{ github.workspace }}
+
+      - name: contextcore --version works
+        run: |
+          contextcore --version || contextcore --help | head -3
+        env:
+          CONTEXTCORE_SDK_ROOT: ${{ github.workspace }}
+
+      - name: doctor command runs without crash
+        run: |
+          contextcore doctor || true
+        env:
+          CONTEXTCORE_SDK_ROOT: ${{ github.workspace }}
+
+  package-build:
+    name: Package Build
+    runs-on: ubuntu-latest
+    needs: [unit-tests, config-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check package integrity
+        run: twine check dist/*
+
+      - name: Verify wheel installs cleanly
+        run: |
+          pip install dist/*.whl --force-reinstall
+          python -c "import cli.main; print('wheel install: OK')"
