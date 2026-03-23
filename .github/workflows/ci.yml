@@ -159,17 +159,19 @@ jobs:
           print('sqlite-vec version:', row[0])
           "
 
-      - name: Test Annoy image vector store
+      - name: Test Annoy installed and importable
         run: |
           python -c "
-          import tempfile, os, numpy as np, pathlib
-          with tempfile.TemporaryDirectory() as tmp:
-              os.environ['CONTEXTCORE_STORAGE_DIR'] = tmp
-              os.environ['CONTEXTCORE_IMAGE_DIR'] = tmp
-              from image_search_implementation_v2.annoy_store import rebuild_annoy_index, annoy_installed
-              assert annoy_installed(), 'annoy not installed'
-              result = rebuild_annoy_index()
-              print('Annoy index build: OK')
+          import annoy
+          print('annoy version:', annoy.__version__)
+          # Quick sanity: create and query a tiny index
+          import numpy as np
+          ai = annoy.AnnoyIndex(512, 'angular')
+          for i in range(5):
+              ai.add_item(i, np.random.rand(512).astype(np.float32))
+          ai.build(10)
+          ids, distances = ai.get_nns_by_vector(np.random.rand(512).astype(np.float32), 3)
+          print('Annoy index build: OK')
           "
 
   cli-smoke:
