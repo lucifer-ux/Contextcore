@@ -168,7 +168,7 @@ jobs:
           for i in range(5):
               ai.add_item(i, np.random.rand(512).astype(np.float32))
           ai.build(10)
-          ids, distances = ai.get_nns_by_vector(np.random.rand(512).astype(np.float32), 3)
+          ids = ai.get_nns_by_vector(np.random.rand(512).astype(np.float32), 3)
           print('Annoy index build: OK')
           "
 
