@@ -3506,14 +3506,16 @@ def fetch_thumbnails(
 
 @app.get("/storage/usage")
 def storage_usage():
-    if not os.path.exists("/mnt/storage"):
+    from config import get_storage_dir
+    storage_path = str(get_storage_dir())
+    if not os.path.exists(storage_path):
         raise HTTPException(404, "Storage not found")
-    s     = os.statvfs("/mnt/storage")
+    s     = os.statvfs(storage_path)
     total = s.f_frsize * s.f_blocks
     free  = s.f_frsize * s.f_bavail
     used  = total - free
     return {
-        "path":         "/mnt/storage",
+        "path":         storage_path,
         "total_bytes":  total,
         "used_bytes":   used,
         "free_bytes":   free,
