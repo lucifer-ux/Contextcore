@@ -166,10 +166,10 @@ jobs:
           with tempfile.TemporaryDirectory() as tmp:
               os.environ['CONTEXTCORE_STORAGE_DIR'] = tmp
               os.environ['CONTEXTCORE_IMAGE_DIR'] = tmp
-              from image_search_implementation_v2.vector_store import build_index, search_vectors, add_to_db
-              vectors = [(i, np.random.rand(512).astype(np.float32)) for i in range(10)]
-              build_index(vectors)
-              print('Annoy index built: OK')
+              from image_search_implementation_v2.annoy_store import rebuild_annoy_index, annoy_installed
+              assert annoy_installed(), 'annoy not installed'
+              result = rebuild_annoy_index()
+              print('Annoy index build: OK')
           "
 
   cli-smoke:
