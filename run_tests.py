@@ -56,7 +56,7 @@ test("unimain.py no hardcoded /mnt/storage paths", t_no_hardcoded_unimain)
 def t_no_hardcoded_worker():
     c = open("audio_search_implementation_v2/worker.py", "r", encoding="utf-8").read()
     assert "/mnt/storage/organized_files" not in c
-test("worker.py no hardcoded paths", t_no_hardcoded_worker)
+test("worker.py  no hardcoded paths", t_no_hardcoded_worker)
 
 # ---- STEP 3: sqlite-vec ----
 def t_sqlite_vec():
