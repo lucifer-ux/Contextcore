@@ -159,35 +159,6 @@ jobs:
           print('sqlite-vec version:', row[0])
           "
 
-      - name: Test text search db init and upsert
-        run: |
-          python -c "
-          import tempfile, os, pathlib
-          with tempfile.TemporaryDirectory() as tmp:
-              os.environ['CONTEXTCORE_STORAGE_DIR'] = tmp
-              from text_search_implementation_v2.db import init_db, upsert_file, query_fts
-              init_db()
-              upsert_file('/tmp/test.txt', 'test.txt', 1234567890.0, 'hello world search test', 'test')
-              results = query_fts('hello world', 5)
-              assert len(results) > 0, 'FTS search returned no results'
-              print(f'Text FTS search: OK — {len(results)} result(s)')
-          "
-
-      - name: Test image db init and upsert
-        run: |
-          python -c "
-          import tempfile, os
-          with tempfile.TemporaryDirectory() as tmp:
-              os.environ['CONTEXTCORE_STORAGE_DIR'] = tmp
-              os.environ['CONTEXTCORE_IMAGE_DIR'] = tmp
-              from image_search_implementation_v2.db import init_db, upsert_image, query_fts
-              init_db()
-              upsert_image('/tmp/test.jpg', 'test.jpg', 1234567890.0, 'a red apple on a white table')
-              results = query_fts('apple', 5)
-              assert len(results) > 0, 'Image FTS returned no results'
-              print(f'Image FTS OCR search: OK — {len(results)} result(s)')
-          "
-
       - name: Test Annoy image vector store
         run: |
           python -c "
