@@ -3,7 +3,7 @@
 ContextCore is a local CLI + backend + MCP integration layer for searching text, images, audio, and video from AI tools such as Claude Desktop.
 
 This README is intentionally focused on:
-- how to install it
+- how to install it 
 - how to run it
 - how to connect it to Claude desktop/code
 - how to verify that indexing and search are working

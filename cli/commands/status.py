@@ -29,6 +29,37 @@ def _count(db: Path, query: str) -> int:
         return -1
 
 
+def _count_total_bytes(db: Path, table: str, col: str) -> int:
+    if not db.exists():
+        return -1
+    try:
+        with sqlite3.connect(str(db)) as conn:
+            result = conn.execute(f"SELECT SUM(LENGTH({col})) FROM {table}").fetchone()[0]
+            return int(result) if result else 0
+    except Exception:
+        return -1
+
+
+def _count_code_tokens(db: Path) -> tuple[int, int]:
+    if not db.exists():
+        return -1, -1
+    try:
+        with sqlite3.connect(str(db)) as conn:
+            line_count = conn.execute("SELECT SUM(line_count) FROM project_files").fetchone()[0] or 0
+            symbol_count = conn.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0] or 0
+            return int(line_count), int(symbol_count)
+    except Exception:
+        return -1, -1
+
+
+def _estimate_naive_tokens(text_bytes: int) -> int:
+    return max(1, text_bytes // 4)
+
+
+def _estimate_optimized_tokens(text_bytes: int) -> int:
+    return max(1, text_bytes // 8)
+
+
 def _print_port_conflict(port: int) -> None:
     usage = get_port_usage(port)
     pid = usage.get("pid")
@@ -110,9 +141,9 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     video_db = sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db"
     code_db = sdk_root / "storage" / "code_index_layer1.db"
 
-    text_total = _count(text_db, "SELECT COUNT(*) FROM files")
+    text_total = _count(text_db, "SELECT COUNT(*) FROM files WHERE LOWER(category) NOT IN ('audio', 'video_transcript')")
     audio_total = _count(text_db, "SELECT COUNT(*) FROM files WHERE LOWER(category)='audio'")
-    doc_total = max(0, text_total - max(0, audio_total)) if text_total >= 0 else -1
+    doc_total = text_total
     code_total = _count(code_db, "SELECT COUNT(*) FROM project_files")
     image_total = _count(image_db, "SELECT COUNT(*) FROM images")
     video_total = _count(video_db, "SELECT COUNT(*) FROM videos")
@@ -147,15 +178,102 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     console.print()
     console.print(table)
 
+    section("Watch Folders")
+    watch_dirs = get_watch_directories()
+    if watch_dirs:
+        watch_table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+        watch_table.add_column("#", width=4, style="dim")
+        watch_table.add_column("Path", style="bold")
+        watch_table.add_column("Status", width=20)
+
+        for idx, path in enumerate(watch_dirs, 1):
+            exists = path.exists()
+            status = "[green]exists[/green]" if exists else "[red]missing[/red]"
+            watch_table.add_row(str(idx), str(path), status)
+
+        console.print()
+        console.print(watch_table)
+    else:
+        warning("No watch folders configured. Run 'contextcore init' to set up.")
+
+    section("Token Optimization")
+
+    text_bytes = _count_total_bytes(text_db, "files", "content")
+    image_bytes = _count_total_bytes(image_db, "images", "ocr_text")
+    video_desc_bytes = _count_total_bytes(video_db, "frames", "description")
+    video_ocr_bytes = _count_total_bytes(video_db, "frames", "ocr_text")
+    video_bytes = video_desc_bytes + video_ocr_bytes
+
+    code_lines, code_symbols = _count_code_tokens(code_db)
+
+    token_table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+    token_table.add_column("Source", style="bold", width=16)
+    token_table.add_column("Naive Tokens", width=14, justify="right")
+    token_table.add_column("ContextCore Tokens", width=20, justify="right")
+    token_table.add_column("Saved", width=12, justify="right")
+    token_table.add_column("Reduction", width=12, justify="right")
+
+    total_naive = 0
+    total_optimized = 0
+
+    rows_data = [
+        ("Text Content", text_bytes, True),
+        ("Images (OCR)", image_bytes, True),
+        ("Video Descriptions", video_desc_bytes, True),
+        ("Video OCR", video_ocr_bytes, True),
+        ("Code", code_lines * 2 if code_lines > 0 else 0, False),
+    ]
+
+    for source, bytes_val, is_text in rows_data:
+        if bytes_val <= 0:
+            naive = 0
+            opt = 0
+        elif is_text:
+            naive = _estimate_naive_tokens(bytes_val)
+            opt = _estimate_optimized_tokens(bytes_val)
+        else:
+            naive = bytes_val
+            opt = code_symbols if code_symbols > 0 else 0
+
+        saved = naive - opt
+        pct = (saved / naive * 100) if naive > 0 else 0
+
+        if source == "Code":
+            naive_str = f"[red]{naive:,}[/red]"
+            opt_str = f"[green]{opt:,}[/green]" if opt > 0 else "[dim]-[/dim]"
+            saved_str = f"[green]{saved:,}[/green]" if saved > 0 else "[dim]-[/dim]"
+            pct_str = f"[green]{pct:.1f}%[/green]" if pct > 0 else "0%"
+        else:
+            naive_str = f"[red]{naive:,}[/red]"
+            opt_str = f"[green]{opt:,}[/green]" if opt > 0 else "[dim]-[/dim]"
+            saved_str = f"[green]{saved:,}[/green]" if saved > 0 else "[dim]-[/dim]"
+            pct_str = f"[green]{pct:.1f}%[/green]" if pct > 0 else "0%"
+
+        token_table.add_row(source, naive_str, opt_str, saved_str, pct_str)
+
+        total_naive += naive
+        total_optimized += opt
+
+    console.print()
+    console.print(token_table)
+
+    if total_naive > 0:
+        total_saved = total_naive - total_optimized
+        total_pct = (total_saved / total_naive * 100) if total_naive > 0 else 0
+        console.print(f"\n[bold]Total Token Savings:[/bold] [green]{total_saved:,}[/green] tokens ([red]{total_naive:,}[/red] → [green]{total_optimized:,}[/green], {total_pct:.1f}% reduction)")
+    else:
+        console.print("\n[dim]No content indexed yet - token savings will appear after indexing.[/dim]")
+
+    console.print()
+    console.print("[dim]Note: Token counts above are estimates based on content stored in ContextCore's[/dim]")
+    console.print("[dim]index. First overview provides maximum token savings as it returns semantic symbols[/dim]")
+    console.print("[dim](functions, classes, signatures) instead of full source. Subsequent file reads via[/dim]")
+    console.print("[dim]MCP fetch specific line ranges on-demand, which may vary based on code editor usage.[/dim]")
+
     section("Config")
     cfg = Path.home() / ".contextcore" / "contextcore.yaml"
     if cfg.exists():
         success(f"Config: [bold]{cfg}[/bold]")
-        watch_dirs = get_watch_directories()
-        if watch_dirs:
-            success(f"Watch folders: [bold]{len(watch_dirs)}[/bold]")
-            for path in watch_dirs[:5]:
-                success(f"Watching: [bold]{path}[/bold]")
     else:
         warning("No config found. Run  contextcore init  to set up.")
 
