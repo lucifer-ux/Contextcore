@@ -10,7 +10,7 @@ and send only what matters to AI.
 | Text notes  | 889,710 tokens    | 444,855 tokens  | 50%       |
 | Codebase    | 97,868 tokens     | 1,085 tokens    | **98.9%** |
 
-<!-- SCREENSHOT PLACEHOLDER: Add a screenshot here showing ContextCore in action -->
+![alt text](./images/image.png)
 
 ## Install
 
@@ -29,7 +29,9 @@ Then run the setup wizard:
 contextcore init
 ```
 
-<!-- GIF PLACEHOLDER: Add a GIF here showing the setup process -->
+![ContextCore Setup](./images/Demonstration.gif)
+
+Gif is sped up to skip the installation parts
 
 That's it. ContextCore indexes your files, registers with your AI tools, 
 and runs in the background. No config files to edit.
