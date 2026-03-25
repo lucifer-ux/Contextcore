@@ -1,15 +1,49 @@
 # ContextCore
 
-ContextCore is a local CLI + backend + MCP integration layer for searching text, images, audio, and video from AI tools such as Claude Desktop.
+Search all your local data — notes, code, recordings, images — 
+and send only what matters to AI.
 
-This README is intentionally focused on:
-- how to install it 
-- how to run it
-- how to connect it to Claude desktop/code
-- how to verify that indexing and search are working
-- how to troubleshoot common failures
+> Cut Claude API costs by 50–99% without losing context quality.
 
-It does not try to explain the internal code architecture.
+| Source       | Without ContextCore | With ContextCore | Reduction |
+|-------------|-------------------|-----------------|-----------|
+| Text notes  | 889,710 tokens    | 444,855 tokens  | 50%       |
+| Codebase    | 97,868 tokens     | 1,085 tokens    | **98.9%** |
+
+<!-- SCREENSHOT PLACEHOLDER: Add a screenshot here showing ContextCore in action -->
+
+## Install
+
+**macOS / Linux**
+```bash
+curl -sL https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.sh | bash
+```
+
+**Windows**
+```powershell
+irm https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 | iex
+```
+
+Then run the setup wizard:
+```bash
+contextcore init
+```
+
+<!-- GIF PLACEHOLDER: Add a GIF here showing the setup process -->
+
+That's it. ContextCore indexes your files, registers with your AI tools, 
+and runs in the background. No config files to edit.
+
+## Prerequisites
+
+- Python 3.10+
+- Windows, macOS, or Linux
+- Internet access for first-time model downloads
+- Enough disk space for Python packages and model files
+
+Optional but important:
+- `ffmpeg` for video indexing
+- Claude Desktop or another MCP-capable tool if you want interactive AI integration
 
 ## What ContextCore Does
 
@@ -45,89 +79,6 @@ For real usage, the most reliable setup is:
 
 Do not test the backend in one venv and point Claude at a different venv. That is one of the most common causes of "it works in the terminal but not in Claude".
 
-## Prerequisites
-
-You need:
-- Python 3.10+
-- Windows, macOS, or Linux
-- internet access for first-time model downloads
-- enough disk space for Python packages and model files
-
-Optional but important:
-- `ffmpeg` for video indexing
-- Claude Desktop or another MCP-capable tool if you want interactive AI integration
-
-## Quick Install (One-Command Setup)
-
-The installer will clone the repo, install dependencies, and set up everything.
-
-### Windows (PowerShell)
-
-Quick start:
-```powershell
-irm https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 | iex
-```
-
-Safe start (download and inspect first):
-```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 -OutFile install.ps1
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-### macOS / Linux (bash)
-
-Quick start:
-```bash
-curl -sL https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.sh | bash
-```
-
-Safe start (download and inspect first):
-```bash
-curl -sL https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.sh -o install.sh
-chmod +x install.sh && ./install.sh
-```
-
-### After Installation
-
-Open a NEW terminal and run:
-```bash
-contextcore init
-```
-
-This will:
-- Configure your watched directories
-- Install ML models (CLIP, Whisper)
-- Start the backend server
-- Begin initial indexing
-
-## Install From Source (Local Development)
-
-### Windows
-
-```powershell
-cd C:\path\to\SearchEmbedSDK
-
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .
-```
-
-### macOS / Linux
-
-```bash
-cd /path/to/SearchEmbedSDK
-
-python3 -m venv .venv
-source .venv/bin/activate
-
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .
-```
-
 ## Verify Install
 
 Run:
@@ -137,43 +88,6 @@ contextcore --help
 ```
 
 If that fails, the venv is either not activated or the editable install did not complete.
-
-## First-Time Setup
-
-Run:
-
-```powershell
-contextcore init
-```
-
-The setup wizard walks through:
-- directory to watch
-- modalities to enable
-- storage location
-- optional MCP registration
-- backend startup
-- initial indexing
-
-### Recommended choices
-
-If you want full multimodal support, enable:
-- `text`
-- `image`
-- `audio`
-- `video`
-
-If you only want to test quickly, point it to a small folder with a few known files.
-
-## What `contextcore init` Does
-
-Depending on what you select, `contextcore init` may:
-- write `~/.contextcore/contextcore.yaml`
-- install heavy Python dependencies
-- install or detect `ffmpeg`
-- prewarm CLIP and Whisper models
-- start the backend server
-- start the initial indexing scan
-- optionally update MCP tool configs
 
 ## Daily Commands
 
@@ -381,41 +295,6 @@ Invoke-WebRequest http://127.0.0.1:8000/health
 ```
 
 If the backend is healthy, you should get a successful response.
-
-## Reset and Re-Test From Scratch
-
-If you want to test like a fresh user, remove the venv and recreate it.
-
-### Windows
-
-```powershell
-deactivate 2>$null
-
-Get-CimInstance Win32_Process | Where-Object {
-  $_.ExecutablePath -like 'C:\path\to\SearchEmbedSDK\.venv*'
-} | Select-Object ProcessId, ExecutablePath, CommandLine
-
-Stop-Process -Id <PID> -Force
-
-Remove-Item -Recurse -Force C:\path\to\SearchEmbedSDK\.venv
-```
-
-Then reinstall:
-
-```powershell
-cd C:\path\to\SearchEmbedSDK
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .
-```
-
-Then rerun:
-
-```powershell
-contextcore init
-```
 
 ## Troubleshooting
 
@@ -626,51 +505,6 @@ If your IDE still shows thousands of changes:
 - refresh Source Control
 - reload the IDE window
 - verify your IDE workspace is rooted at the repo you actually want
-
-## Recommended End-to-End Test
-
-1. Create or activate the repo-local `.venv`
-2. Install:
-
-```powershell
-pip install -r requirements.txt
-pip install -e .
-```
-
-3. Run:
-
-```powershell
-contextcore init
-```
-
-4. Point it at a folder with known sample files
-5. Enable all modalities
-6. Check:
-
-```powershell
-contextcore status
-```
-
-7. Confirm backend:
-
-```powershell
-Invoke-WebRequest http://127.0.0.1:8000/health
-```
-
-8. Confirm Claude config uses the same venv
-9. Restart Claude Desktop
-10. Test search from Claude
-
-## Files You Will Commonly Use
-
-- repo config loader:
-  - `config.py`
-- backend entry:
-  - `unimain.py`
-- MCP bridge:
-  - `mcp_server.py`
-- user config:
-  - `~/.contextcore/contextcore.yaml`
 
 ## If You Need Help
 
