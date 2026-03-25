@@ -10,7 +10,7 @@ and send only what matters to AI.
 | Text notes  | 889,710 tokens    | 444,855 tokens  | 50%       |
 | Codebase    | 97,868 tokens     | 1,085 tokens    | **98.9%** |
 
-![alt text](./images/image.png)
+![ContextCore Screenshot](images/image.png)
 
 ## Install
 
@@ -29,7 +29,7 @@ Then run the setup wizard:
 contextcore init
 ```
 
-![ContextCore Setup](./images/Demonstration.gif)
+![ContextCore Setup](images/Demonstration.gif)
 
 Gif is sped up to skip the installation parts
 

@@ -86,6 +86,9 @@ temp/
 # -------------------------------
 # Media files (do NOT commit user data)
 # -------------------------------
+# Except README images folder
+!images/
+images/
 *.mp4
 *.mkv
 *.avi
