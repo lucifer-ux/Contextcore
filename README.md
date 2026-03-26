@@ -31,7 +31,8 @@ contextcore init
 
 ![ContextCore Setup](images/Demonstration.gif)
 
-Gif is sped up to skip the installation parts
+Gif is sped up to skip the installation parts.
+This is not supermemory, but supercharged memory for all file formats shared all across.
 
 That's it. ContextCore indexes your files, registers with your AI tools, 
 and runs in the background. No config files to edit.
