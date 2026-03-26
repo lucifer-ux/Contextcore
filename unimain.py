@@ -2382,6 +2382,40 @@ def run_video_search(query: str, top_k: int = 10):
         return {"error": str(e)}
 
 
+def run_audio_search(query: str, top_k: int = 10):
+    try:
+        from text_search_implementation_v2.db import query_fts, get_file_metadata_by_ids, get_fts_content_by_ids
+        
+        tokens = query.strip().lower().split()
+        if tokens:
+            match_q = " OR ".join(t + "*" for t in tokens)
+            rows = query_fts(match_q, limit=top_k * 2)
+        else:
+            rows = []
+        
+        audio_results = []
+        for r in rows:
+            meta = get_file_metadata_by_ids([r["id"]]).get(r["id"])
+            if not meta or meta.get("category") != "audio":
+                continue
+            
+            content = get_fts_content_by_ids([r["id"]]).get(r["id"], "")
+            audio_results.append({
+                "path": meta["path"],
+                "filename": meta["filename"],
+                "category": meta["category"],
+                "score": -float(r["score"]),
+                "transcript": content[:500] if content else "",
+            })
+            if len(audio_results) >= top_k:
+                break
+        
+        return {"hits": audio_results}
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
 # ═══════════════════════════════════════════════════════════════
 #  FastAPI app
 # ═══════════════════════════════════════════════════════════════
@@ -2536,8 +2570,8 @@ async def unified_search(
     async with rm.embed_context():
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=SEARCH_THREADPOOL) as ex:
-            text_res = image_res = video_res = None
-            if mode in {"all", "text", "audio"}:
+            text_res = image_res = video_res = audio_res = None
+            if mode in {"all", "text"}:
                 try:
                     text_res  = await asyncio.wait_for(
                         loop.run_in_executor(
@@ -2554,6 +2588,12 @@ async def unified_search(
                     )
                 except Exception as e:
                     text_res  = {"error": str(e)}
+            if mode in {"all", "audio"}:
+                try:
+                    audio_res = await asyncio.wait_for(
+                        loop.run_in_executor(ex, run_audio_search, q, min(50, top_k)), timeout=8)
+                except Exception as e:
+                    audio_res = {"error": str(e)}
             if mode in {"all", "image"}:
                 try:
                     image_res = await asyncio.wait_for(
@@ -2568,10 +2608,16 @@ async def unified_search(
                     video_res = {"error": str(e)}
 
     out = {"query": q, "modality": mode}
-    out["text"]  = ({"count": len(text_res),  "results": text_res}
+    text_results = text_res if isinstance(text_res, list) else []
+    text_results = [t for t in text_results if t.get("category") != "audio"]
+    out["text"]  = ({"count": len(text_results),  "results": text_results}
                     if isinstance(text_res, list)
                     else {"count": 0, "results": [],
                           "error": text_res.get("error") if isinstance(text_res, dict) else None})
+    out["audio"] = ({"count": len(audio_res.get("hits", [])), "results": audio_res.get("hits", [])}
+                    if isinstance(audio_res, dict)
+                    else {"count": 0, "results": [],
+                          "error": audio_res.get("error") if isinstance(audio_res, dict) else None})
     out["image"] = ({"count": len(image_res["hits"]), "results": image_res["hits"]}
                     if isinstance(image_res, dict) and "hits" in image_res
                     else {"count": 0, "results": [],

@@ -648,6 +648,7 @@ def search_videos(query: str, top_k: int = 5):
 
     conn.close()
     ordered = sorted(hits.values(), key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    ordered = [h for h in ordered if float(h.get("score", 0)) > 0]
     return {"hits": ordered[:top_k]}
 
 

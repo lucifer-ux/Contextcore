@@ -72,6 +72,20 @@ def index_cmd(
     run_index(target=target)
 
 
+# ── contextcore search ──────────────────────────────────────────────────────────
+
+@app.command()
+def search():
+    """
+    [bold]Interactive search across all modalities.[/bold]
+
+    Search for files by content (text, images, videos, audio).
+    Enter a query, view results grouped by type, and open files directly.
+    """
+    from cli.commands.search import run_search
+    run_search()
+
+
 @app.command("add-folder")
 def add_folder_cmd(
     path: str = typer.Argument(..., help="Directory to add to the watch list."),

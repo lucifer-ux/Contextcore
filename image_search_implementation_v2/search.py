@@ -254,4 +254,5 @@ def search(query: str, top_k: int = 20):
         )
 
     results.sort(key=lambda x: x["final_score"], reverse=True)
+    results = [r for r in results if r["final_score"] > 0]
     return results[:top_k]

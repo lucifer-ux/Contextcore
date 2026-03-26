@@ -142,7 +142,7 @@ class TextSearchEngineV2:
             if meta["path"] in excluded:
                 continue
 
-            base = 1.0 / (1.0 + float(r["score"]))
+            base = -float(r["score"])
 
             # fuzzy filename boost
             fname = meta["filename"].lower()

@@ -18,7 +18,7 @@ from .db import allocate_annoy_id, init_db, needs_embedding, update_embedding_me
 from .embedder import embed_image
 from .ocr import extract_ocr_from_image
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".gif", ".pdf"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".gif"}
 
 
 def _embedding_hash(vec: np.ndarray) -> str:
@@ -40,11 +40,6 @@ def index_file(p: Path) -> bool:
     ocr_text = extract_ocr_from_image(p)
     mtime = p.stat().st_mtime
     changed, img_id = upsert_image(str(p), p.name, mtime, ocr_text)
-
-    # PDFs are OCR/lexical searchable but do not go through CLIP image embeddings.
-    if ext == ".pdf":
-        print("indexed metadata only (pdf):", p)
-        return True
 
     must_embed = changed or needs_embedding(img_id)
     if not must_embed:
