@@ -1,10 +1,37 @@
 """
 MCP adapter for ContextCore unified search backend.
 
-Three tools only:
-  1. search         - find relevant content across all indexed sources
-  2. index_content  - trigger background indexing when content seems stale
-  3. list_sources   - discover what connectors and paths are indexed
+LLM Tool Routing Guide (applies to Claude, Cursor, Cline, OpenCode, etc.)
+--------------------------------------------------------------------------
+Use this order unless the user explicitly asks otherwise:
+
+1) `search`
+   - First tool for user questions about their files/content.
+   - Use modality="all" unless user explicitly restricts to text/image/video/audio.
+   - If empty or weak results: then call `index_content` and retry `search`.
+
+2) `fetch_content`
+   - Use after `search` when you need deeper details from a specific file.
+   - For videos this returns frame descriptions + transcript excerpts.
+   - For images this returns OCR text (if available) + file metadata.
+
+3) `get_neighbors`
+   - Use for adjacent context around a specific text/audio chunk.
+
+4) `list_sources`
+   - Use when user asks what is indexed, what folders are watched, or index counts.
+
+5) `index_content`
+   - Use only when content is missing/stale or user asks to reindex.
+   - Do not call repeatedly for every query.
+
+6) `prepare_file_for_tool` / `reveal_file`
+   - Use when user wants to open, attach, or inspect local files in GUI tools.
+
+7) Codebase tools (`get_codebase_context`, `get_codebase_index`,
+   `get_module_detail`, `get_file_content`)
+   - Use for repository reasoning tasks.
+   - Prefer `get_codebase_context` first for comprehensive project context.
 """
 
 from __future__ import annotations
@@ -648,35 +675,32 @@ def search(
     include_metadata: bool = False,
 ) -> dict[str, Any]:
     """
-    Search the user's indexed content - documents, messages, images,
-    audio transcripts, and videos - and return the most relevant results
-    with exact source paths.
+    Primary retrieval tool for user data.
 
-    WHEN TO CALL:
-    Call this tool first whenever the user asks about anything that might
-    exist in their files, messages, or stored content. Always call this
-    before attempting to answer from memory alone.
+    WHAT IT DOES:
+    - Searches indexed text, images, audio transcripts, and video context.
+    - Returns ranked results with source paths and modality-specific fields.
 
-    PARAMETERS:
-    - query: the user's question or topic in natural language. Do not
-      rewrite or simplify the query - pass it as the user said it.
-    - top_k: number of results to return. Use 5 (default) for most
-      questions. Use 10 if the user wants a broad overview or asks to
-      compare multiple things. Never exceed 15.
-    - modality: filter by content type. Use "all" (default) unless the
-      user specifically asks about images ("image"), videos ("video"),
-      audio recordings ("audio"), or documents ("text").
+    WHEN TO USE:
+    - First call for any user question that might be answered by local content.
+    - Use before answering from memory.
 
-    AFTER CALLING:
-    Use the returned content and source paths directly in your response.
-    Cite the source field so the user knows exactly where each piece of
-    information came from. Do not call run_llm or any other tool after
-    this - answer from the results directly.
+    HOW TO USE:
+    - `query`: pass user intent directly in natural language.
+    - `modality`:
+      - "all" for most tasks
+      - "text" / "image" / "video" / "audio" when user explicitly narrows scope
+    - `top_k`: keep <= 15. Use 5 by default.
+    - `include_metadata`: true when chunk metadata/source fields are needed.
 
-    WHEN RESULTS ARE EMPTY:
-    If results are empty or scores are all below 0.1, tell the user their
-    content may not be indexed yet and suggest they run index_content.
-    Do not guess or hallucinate an answer if search returns nothing useful.
+    AFTER SEARCH:
+    - If results are good: answer using returned evidence with citations/paths.
+    - If a single result needs more detail: call `fetch_content`.
+    - If results are empty/low-confidence: call `index_content`, then retry search.
+
+    DO NOT:
+    - Hallucinate answers if retrieval is empty.
+    - Call index_content repeatedly for every query.
     """
     normalized_modality = modality.strip().lower()
     if normalized_modality not in {"all", "text", "image", "video", "audio"}:
@@ -807,24 +831,23 @@ def fetch_content(
     modality: str = "auto",
 ) -> dict[str, Any]:
     """
-    Fetch readable content or metadata for a specific file found via search.
+    Secondary retrieval tool for file-level detail.
 
-    For video files: returns frame descriptions, timestamps, and transcript
-    excerpts so the agent can understand what is in the video without needing
-    to play it.
+    USE THIS WHEN:
+    - `search` found a relevant file and you need more context from that file.
+    - You need transcript/frame details for video.
+    - You need OCR text or metadata for an image.
 
-    For text/audio files: returns the indexed content/transcript.
+    INPUTS:
+    - `path`: absolute file path from `search` results.
+    - `modality`:
+      - "auto" (recommended)
+      - or explicit "video" / "text" / "image"
 
-    For image files: returns the file path for direct access by local tools.
-
-    WHEN TO CALL:
-    Call this after search() returns a result and you need more detail about
-    a specific file — especially for videos where the search result only has
-    a score and brief description.
-
-    PARAMETERS:
-    - path: the absolute source path from a search result
-    - modality: "auto" (detect from extension), "video", "text", "image"
+    OUTPUT:
+    - Video: frame timeline + transcript excerpt (if indexed).
+    - Text/audio: indexed textual content.
+    - Image: OCR text and metadata when available.
     """
     p = Path(path).expanduser().resolve()
     if not p.exists():
@@ -1092,9 +1115,15 @@ def filesystem_access_profile(tool: str) -> dict[str, Any]:
 @mcp.tool()
 def prepare_file_for_tool(path: str, tool: str) -> dict[str, Any]:
     """
-    Prepare a local file for a specific client tool:
-    - local agents: return absolute path for direct read
-    - remote/web tools: open explorer/finder selection for drag-drop flow
+    File handoff helper for tool compatibility.
+
+    USE THIS WHEN:
+    - User wants to open/attach/send a local file into a client tool.
+    - You need to adapt behavior based on whether the tool has local FS access.
+
+    BEHAVIOR:
+    - Local filesystem tools: returns direct absolute path.
+    - Remote/web tools: opens system file manager for drag-drop workflow.
     """
     p = Path(path).expanduser().resolve()
     if not p.exists():
@@ -1132,6 +1161,23 @@ def refine_search(
     session_id: str = "default",
     include_metadata: bool = False,
 ) -> dict[str, Any]:
+    """
+    Query refinement tool for iterative retrieval.
+
+    USE THIS WHEN:
+    - Initial search is too broad, noisy, or misses intent.
+    - You have a clear reason for refinement (e.g., add modality terms,
+      constrain source, remove ambiguity).
+
+    INPUTS:
+    - `original_query`: the first user query.
+    - `reason`: why refinement is needed.
+    - `refined_query`: improved query to execute.
+    - `exclude_sources`: optional paths/sources to exclude.
+
+    OUTPUT:
+    - New retrieval payload plus session budget state.
+    """
     budget = _consume_budget(session_id=session_id, reset=False)
     if not budget.get("ok"):
         return budget
@@ -1220,16 +1266,21 @@ def index_content(
     target_dir: str | None = None,
 ) -> dict[str, Any]:
     """
-    Trigger a background scan to index new or updated files from all
-    configured sources, or a specific directory if provided. Returns immediately.
+    Trigger background indexing for new/stale content.
 
-    WHEN TO CALL:
-    Only call this if:
-    - The user explicitly says content is missing from search results
-    - The user says "re-index", "refresh", or "scan my files"
-    - The user asks to index a specific folder (use target_dir)
+    USE THIS WHEN:
+    - User explicitly asks to reindex/refresh/scan.
+    - Search results are missing stale or expected files.
+    - User asks to index a specific folder (`target_dir`).
 
-    Do NOT call this proactively before every search.
+    HOW TO USE:
+    - Keep all modalities enabled for full refresh.
+    - Set only required modalities when user asks for targeted indexing.
+    - Use `target_dir` to constrain indexing scope.
+
+    DO NOT:
+    - Trigger this on every query.
+    - Loop index calls back-to-back without user intent.
     """
     params = {
         "run_text": run_text,
@@ -1251,9 +1302,16 @@ def index_content(
 @mcp.tool()
 def list_sources() -> dict[str, Any]:
     """
-    Return what content sources are currently configured and indexed -
-    folders being watched, connectors active, and a count of indexed
-    items per modality.
+    Source and index inventory tool.
+
+    USE THIS WHEN:
+    - User asks what is indexed, which folders are configured, or connector status.
+    - You need quick diagnostics before deciding whether to reindex.
+
+    RETURNS:
+    - Configured source folders per modality.
+    - Indexed item counts (text/audio/image/video/total).
+    - Image backend status/capabilities snapshot from backend.
     """
     try:
         from config import get_organized_root, get_video_directories, get_audio_directories, get_image_directory
@@ -1328,3 +1386,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

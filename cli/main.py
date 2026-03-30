@@ -148,6 +148,56 @@ def register(
     run_register(tool=tool)
 
 
+@app.command()
+def report(
+    message: list[str] = typer.Argument(
+        None,
+        help="Issue description. Example: contextcore report image search returns empty results",
+    ),
+    repo: str = typer.Option(
+        "",
+        "--repo",
+        help="Optional GitHub repo override (owner/repo). Default: detected from git origin.",
+    ),
+    title: str = typer.Option(
+        "",
+        "--title",
+        help="Optional issue title override.",
+    ),
+):
+    """
+    [bold]Report an issue to GitHub from the CLI.[/bold]
+
+    Examples:
+      contextcore report image search returns wrong file
+      contextcore report --title "MCP issue" "reveal_file opens wrong folder"
+      contextcore report --repo lucifer-ux/SearchEmbedSDK "setup failed on macOS"
+    """
+    from cli.commands.report import run_report
+
+    joined = " ".join(message).strip() if message else ""
+    run_report(message=joined, repo=(repo or "").strip() or None, title=(title or "").strip() or None)
+
+
+@app.command()
+def update(
+    restart: bool = typer.Option(
+        True,
+        "--restart/--no-restart",
+        help="Restart ContextCore background server after pulling updates.",
+    ),
+):
+    """
+    [bold]Pull latest ContextCore fixes from GitHub.[/bold]
+
+    Uses the sdk_root saved during [bold]contextcore init[/bold], so this works
+    from any current directory.
+    """
+    from cli.commands.update import run_update
+
+    run_update(restart_server=restart)
+
+
 # ── contextcore doctor ─────────────────────────────────────────────────────────
 
 @app.command()

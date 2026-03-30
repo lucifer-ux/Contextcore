@@ -141,6 +141,41 @@ contextcore server status
 contextcore doctor
 ```
 
+### Report an issue to GitHub
+
+```powershell
+contextcore report image search returned empty even though file exists
+```
+
+If you run `contextcore report` without text, it will prompt for a description.
+
+For automatic issue creation, authenticate with either:
+
+```powershell
+gh auth login
+```
+
+or set a token:
+
+```powershell
+$env:CONTEXTCORE_GITHUB_TOKEN = "ghp_xxx"
+```
+
+### Pull latest fixes
+
+```powershell
+contextcore update
+```
+
+This command always targets the `sdk_root` saved during `contextcore init`,
+so it works even if you run it from another folder.
+
+If you do not want an automatic background-server restart after update:
+
+```powershell
+contextcore update --no-restart
+```
+
 ### Register with a tool later
 
 ```powershell
@@ -223,6 +258,22 @@ After changing Claude config:
 - fully quit Claude Desktop
 - start the backend if it is not already running
 - reopen Claude Desktop
+
+## MCP Tool Usage Guide (for any LLM client)
+
+Use this call order in Claude/Cursor/OpenCode/Cline:
+
+1. `search` first for any user question about local files/content.
+2. `fetch_content` after `search` when deeper file detail is required.
+3. `get_neighbors` for adjacent text/audio chunk context.
+4. `list_sources` for index/source diagnostics.
+5. `index_content` only when user asks to reindex or results are stale/missing.
+6. `prepare_file_for_tool` / `reveal_file` when user wants to open/attach local files.
+
+Guidelines:
+- Default to `modality=all` unless user explicitly asks for image/video/audio/text only.
+- If search is empty or low confidence, run `index_content`, then retry `search`.
+- Do not hallucinate answers when retrieval is empty.
 
 ## Claude Code Setup
 
