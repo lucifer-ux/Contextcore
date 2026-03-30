@@ -85,7 +85,7 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     ensure_server(port=port, silent=True)
     server_ok = is_server_running(port)
 
-    section("Server")
+    section("Server", "Runtime process status and MCP entrypoint health.")
     if server_ok:
         success(f"Running on port [bold]{port}[/bold]")
         success("Background watcher active while the server is running")
@@ -104,7 +104,7 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     else:
         error("MCP server script not found")
 
-    section("Index Activity")
+    section("Index Activity", "Current indexing lock state and last full-index outcome.")
     active_lock, state = index_lock_active()
     if active_lock:
         success("Indexing is currently running")
@@ -134,7 +134,7 @@ def run_status(port: int = DEFAULT_PORT) -> None:
         else:
             warning("No full index job has been recorded yet")
 
-    section("Index Progress")
+    section("Index Progress", "Indexed item counts by modality.")
 
     text_db = sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
     image_db = sdk_root / "image_search_implementation_v2" / "storage" / "images_meta.db"
@@ -148,7 +148,7 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     image_total = _count(image_db, "SELECT COUNT(*) FROM images")
     video_total = _count(video_db, "SELECT COUNT(*) FROM videos")
 
-    table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+    table = Table(show_header=True, header_style="title", box=None, padding=(0, 2))
     table.add_column("Modality", style="bold", width=12)
     table.add_column("Indexed", width=10)
     table.add_column("Status", width=24)
@@ -178,10 +178,10 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     console.print()
     console.print(table)
 
-    section("Watch Folders")
+    section("Watch Folders", "Configured directories and filesystem availability.")
     watch_dirs = get_watch_directories()
     if watch_dirs:
-        watch_table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+        watch_table = Table(show_header=True, header_style="title", box=None, padding=(0, 2))
         watch_table.add_column("#", width=4, style="dim")
         watch_table.add_column("Path", style="bold")
         watch_table.add_column("Status", width=20)
@@ -196,7 +196,7 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     else:
         warning("No watch folders configured. Run 'contextcore init' to set up.")
 
-    section("Token Optimization")
+    section("Token Optimization", "Estimated token reduction from ContextCore indexing.")
 
     text_bytes = _count_total_bytes(text_db, "files", "content")
     image_bytes = _count_total_bytes(image_db, "images", "ocr_text")
@@ -206,7 +206,7 @@ def run_status(port: int = DEFAULT_PORT) -> None:
 
     code_lines, code_symbols = _count_code_tokens(code_db)
 
-    token_table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+    token_table = Table(show_header=True, header_style="title", box=None, padding=(0, 2))
     token_table.add_column("Source", style="bold", width=16)
     token_table.add_column("Naive Tokens", width=14, justify="right")
     token_table.add_column("ContextCore Tokens", width=20, justify="right")
@@ -270,7 +270,7 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     console.print("[dim](functions, classes, signatures) instead of full source. Subsequent file reads via[/dim]")
     console.print("[dim]MCP fetch specific line ranges on-demand, which may vary based on code editor usage.[/dim]")
 
-    section("Config")
+    section("Config", "Active configuration, startup hooks, and runtime media tooling.")
     cfg = Path.home() / ".contextcore" / "contextcore.yaml"
     if cfg.exists():
         success(f"Config: [bold]{cfg}[/bold]")

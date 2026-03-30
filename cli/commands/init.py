@@ -20,17 +20,29 @@ from cli.constants import DEFAULT_BACKEND_URL, DEFAULT_PORT
 from cli.env import refresh_process_path
 from cli.lifecycle import autostart_status, install_autostart
 from cli.paths import get_sdk_root, get_mcp_script, get_default_config
-from cli.ui import console, header, section, success, error, warning, info, hint, done_panel
+from cli.ui import (
+    console,
+    header,
+    section,
+    success,
+    error,
+    warning,
+    info,
+    hint,
+    done_panel,
+    set_theme,
+    get_theme_name,
+)
 
 _SDK_ROOT = get_sdk_root()
 if str(_SDK_ROOT) not in sys.path:
     sys.path.insert(0, str(_SDK_ROOT))
 
-from config import get_config, get_storage_path, update_config_values
+from config import get_config, get_storage_path, reload_config, update_config_values
 
 # ── Questionary style ─────────────────────────────────────────────────────────
 
-_STYLE = Style([
+_STYLE_DARK = Style([
     ("qmark",        "fg:#5f87ff bold"),
     ("question",     "bold"),
     ("answer",       "fg:#5fffff bold"),
@@ -39,6 +51,42 @@ _STYLE = Style([
     ("pointer",      "fg:#5f87ff bold"),
     ("separator",    "fg:#444444"),
 ])
+
+_STYLE_LIGHT = Style([
+    ("qmark",        "fg:#1f4de3 bold"),
+    ("question",     "fg:#111111 bold"),
+    ("answer",       "fg:#006d77 bold"),
+    ("selected",     "fg:#006d77 bold"),
+    ("highlighted",  "fg:#1f4de3 bold"),
+    ("pointer",      "fg:#1f4de3 bold"),
+    ("separator",    "fg:#6b7280"),
+])
+
+_STYLE = _STYLE_DARK
+_SETUP_THEME = "dark"
+
+
+def _choose_setup_theme(default_theme: str = "dark") -> None:
+    global _STYLE, _SETUP_THEME
+
+    selected = questionary.select(
+        "Choose setup theme",
+        choices=[
+            questionary.Choice("Dark (recommended)", value="dark"),
+            questionary.Choice("Light", value="light"),
+        ],
+        default=default_theme if default_theme in {"dark", "light"} else "dark",
+        style=_STYLE,
+    ).ask()
+
+    if selected == "light":
+        _STYLE = _STYLE_LIGHT
+        _SETUP_THEME = "light"
+    else:
+        _STYLE = _STYLE_DARK
+        _SETUP_THEME = "dark"
+
+    set_theme(_SETUP_THEME)
 
 # ── MCP config locations ───────────────────────────────────────────────────────
 
@@ -227,6 +275,7 @@ def _write_yaml_config(
     ffmpeg_path: Path | None = None,
     ffprobe_path: Path | None = None,
     video_ocr_enabled: bool = True,
+    ui_theme: str = "dark",
 ) -> Path:
     """Write a contextcore.yaml to ~/.contextcore/contextcore.yaml."""
     _DEFAULT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
@@ -276,6 +325,7 @@ dedup_threshold: 0.85
 video_ocr_enabled: {"true" if video_ocr_enabled else "false"}
 ffmpeg_path: {_yaml_quote(ffmpeg_path) if ffmpeg_path else "''"}
 ffprobe_path: {_yaml_quote(ffprobe_path) if ffprobe_path else "''"}
+ui_theme: '{ui_theme}'
 """
     _DEFAULT_CONFIG.write_text(yaml_content, encoding="utf-8")
     return _DEFAULT_CONFIG
@@ -499,11 +549,11 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
     watch_dirs = _normalize_watch_dirs(watch_raw, watch_dirs)
 
     current_modalities = {
-        "text": bool(existing_cfg.get("enable_text", True)),
-        "code": bool(existing_cfg.get("enable_code", False)),
-        "image": bool(existing_cfg.get("enable_image", False)),
-        "audio": bool(existing_cfg.get("enable_audio", False)),
-        "video": bool(existing_cfg.get("enable_video", False)),
+        "text": True,
+        "code": True,
+        "image": True,
+        "audio": True,
+        "video": True,
     }
     section("What would you like to search?")
     modality_choices = [
@@ -513,6 +563,7 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
         questionary.Choice("Audio recordings and meetings\n      (requires ~150MB model download)", value="audio", checked=current_modalities["audio"]),
         questionary.Choice("Video files\n      (requires both image and audio models)", value="video", checked=current_modalities["video"]),
     ]
+    console.print("  [dim]All modalities are pre-selected. Press [bold]Space[/bold] to uncheck any option.[/dim]")
     selected = questionary.checkbox("Select modalities", choices=modality_choices, style=_STYLE).ask()
     if selected is None:
         error("Setup cancelled.")
@@ -552,6 +603,7 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
         "video_directories": [str(p) for p in watch_dirs] if enable_video else [],
         "audio_directories": [str(p) for p in watch_dirs] if enable_audio else [],
         "code_directories": [str(p) for p in watch_dirs] if enable_code else [],
+        "ui_theme": _SETUP_THEME,
     }
     cfg_path = update_config_values(updates)
     success(f"Config updated at [bold]{cfg_path}[/bold]")
@@ -608,10 +660,13 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
 # ── Main wizard ────────────────────────────────────────────────────────────────
 
 def run_init() -> None:
+    existing_cfg = get_config() if _DEFAULT_CONFIG.exists() else {}
+    preferred_theme = str(existing_cfg.get("ui_theme") or get_theme_name())
+    _choose_setup_theme(preferred_theme)
     header()
     console.print("[bold]Welcome to ContextCore \u2726[/bold]")
     console.print("[dim]Let's get you set up. This takes about 2 minutes.[/dim]")
-    existing_cfg = get_config() if _DEFAULT_CONFIG.exists() else {}
+    info(f"Using [bold]{_SETUP_THEME}[/bold] setup theme.")
     if existing_cfg:
         _show_existing_setup(existing_cfg)
         console.print()
@@ -701,11 +756,12 @@ def run_init() -> None:
 
     modality_choices = [
         questionary.Choice("Text files, PDFs, notes, documents",           value="text",  checked=True),
-        questionary.Choice("Code files and repositories\n      (builds a separate code context index)", value="code", checked=False),
-        questionary.Choice("Images (requires ~300MB model download)",      value="image", checked=False),
-        questionary.Choice("Audio recordings and meetings\n      (requires ~150MB model download)", value="audio", checked=False),
-        questionary.Choice("Video files\n      (requires both image and audio models)",  value="video", checked=False),
+        questionary.Choice("Code files and repositories\n      (builds a separate code context index)", value="code", checked=True),
+        questionary.Choice("Images (requires ~300MB model download)",      value="image", checked=True),
+        questionary.Choice("Audio recordings and meetings\n      (requires ~150MB model download)", value="audio", checked=True),
+        questionary.Choice("Video files\n      (requires both image and audio models)",  value="video", checked=True),
     ]
+    console.print("  [dim]All modalities are pre-selected. Press [bold]Space[/bold] to uncheck any option.[/dim]")
 
     selected = questionary.checkbox(
         "Select modalities",
@@ -779,9 +835,11 @@ def run_init() -> None:
         ffmpeg_path=Path(ffmpeg_paths["ffmpeg_path"]) if ffmpeg_paths.get("ffmpeg_path") else None,
         ffprobe_path=Path(ffmpeg_paths["ffprobe_path"]) if ffmpeg_paths.get("ffprobe_path") else None,
         video_ocr_enabled=True,
+        ui_theme=_SETUP_THEME,
     )
     success(f"Config saved to [bold]{cfg_path}[/bold]")
     if ffmpeg_paths:
+        reload_config()
         update_config_values(ffmpeg_paths)
     _apply_autostart_choice(True)
 
