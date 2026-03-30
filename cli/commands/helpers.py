@@ -5,13 +5,14 @@ import platform
 import subprocess
 import sys
 import json
+import shutil
 from pathlib import Path
 
 from cli.constants import DEFAULT_PORT
 from cli.env import build_runtime_env
-from cli.lifecycle import get_port_usage, read_index_state
+from cli.lifecycle import get_port_usage, read_index_state, uninstall_autostart
 from cli.paths import get_default_config, get_sdk_root
-from cli.ui import console, error, header, info, success, warning
+from cli.ui import console, error, header, info, section, success, warning
 
 _SDK_ROOT = get_sdk_root()
 if str(_SDK_ROOT) not in sys.path:
@@ -498,3 +499,153 @@ def run_server(action: str, port: int = DEFAULT_PORT) -> None:
 
     if ensure_server(port=port, silent=False):
         success(f"ContextCore server restarted on http://127.0.0.1:{port}")
+
+
+def run_uninstall(
+    yes: bool = False,
+    dry_run: bool = False,
+    remove_package: bool = False,
+    purge_model_cache: bool = False,
+) -> None:
+    header()
+    section("Uninstall ContextCore", "This removes local ContextCore state and integrations from this machine.")
+
+    if not yes and not dry_run:
+        warning("This will stop ContextCore, remove indexes/config, and unregister MCP entries.")
+        confirm = console.input("  Type [bold]DELETE[/bold] to continue: ").strip()
+        if confirm != "DELETE":
+            warning("Aborted. Nothing was removed.")
+            return
+
+    contextcore_home = Path.home() / ".contextcore"
+    sdk_root = get_sdk_root()
+    removed: list[str] = []
+    skipped: list[str] = []
+
+    def _remove_path(path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        anchor = Path(resolved.anchor)
+        if resolved == anchor:
+            skipped.append(f"{resolved} (unsafe target)")
+            return
+        if not resolved.exists():
+            skipped.append(f"{resolved} (not found)")
+            return
+        if dry_run:
+            info(f"[dry-run] Would remove {resolved}")
+            return
+        try:
+            if resolved.is_dir():
+                shutil.rmtree(resolved, ignore_errors=False)
+            else:
+                resolved.unlink(missing_ok=True)
+            removed.append(str(resolved))
+        except Exception as exc:
+            warning(f"Could not remove {resolved}: {exc}")
+
+    section("Stop Server")
+    from cli.server import is_server_running, stop_server
+
+    if dry_run:
+        info("[dry-run] Would stop background ContextCore server")
+    else:
+        if stop_server(port=DEFAULT_PORT):
+            success("Stopped background server")
+        elif is_server_running(DEFAULT_PORT):
+            usage = get_port_usage(DEFAULT_PORT)
+            pid = usage.get("pid")
+            warning("Could not stop server cleanly")
+            if pid and usage.get("is_contextcore"):
+                from cli.lifecycle import stop_pid
+
+                if stop_pid(int(pid)):
+                    success(f"Stopped ContextCore PID {pid}")
+                else:
+                    warning(f"Failed to stop PID {pid}")
+        else:
+            info("Server already stopped")
+
+    section("Unregister MCP")
+    try:
+        from register_mcp import get_tool_definitions, unregister_tool
+
+        tools = get_tool_definitions()
+        removed_tools = 0
+        for name, spec in tools.items():
+            if unregister_tool(name, spec, dry_run=dry_run):
+                removed_tools += 1
+        if removed_tools > 0:
+            if dry_run:
+                success(f"Would remove ContextCore MCP entries from {removed_tools} tool config(s)")
+            else:
+                success(f"Removed ContextCore MCP entries from {removed_tools} tool config(s)")
+        else:
+            info("No ContextCore MCP registrations found")
+    except Exception as exc:
+        warning(f"Could not run MCP unregister step: {exc}")
+
+    section("Remove Autostart")
+    if dry_run:
+        info("[dry-run] Would remove autostart entry")
+    else:
+        ok, msg = uninstall_autostart()
+        if ok:
+            success(msg)
+        else:
+            warning(f"Autostart removal failed: {msg}")
+
+    section("Delete Local Data")
+    # Clean known index artifacts first, then remove full local state directories.
+    if dry_run:
+        info("[dry-run] Would remove index databases and cache directories")
+    else:
+        try:
+            reset_index_artifacts()
+        except Exception as exc:
+            warning(f"Index artifact cleanup failed: {exc}")
+
+    data_targets = [
+        contextcore_home,
+        sdk_root / "storage",
+        sdk_root / "text_search_implementation_v2" / "storage",
+        sdk_root / "image_search_implementation_v2" / "storage",
+        sdk_root / "video_search_implementation_v2" / "storage",
+        sdk_root / ".thumbnails",
+        sdk_root / "thumbnails",
+    ]
+    for target in data_targets:
+        _remove_path(target)
+
+    if purge_model_cache:
+        section("Purge Model Cache")
+        model_cache_targets = [
+            Path.home() / ".cache" / "huggingface" / "hub",
+            Path.home() / ".cache" / "torch" / "hub",
+        ]
+        for target in model_cache_targets:
+            _remove_path(target)
+
+    if remove_package:
+        section("Uninstall Pip Package")
+        cmd = [sys.executable, "-m", "pip", "uninstall", "-y", "contextcore"]
+        if dry_run:
+            info(f"[dry-run] Would run: {' '.join(cmd)}")
+        else:
+            result = subprocess.run(cmd)
+            if result.returncode == 0:
+                success("Uninstalled pip package: contextcore")
+            else:
+                warning("Could not uninstall pip package automatically")
+                console.print(f"  [dim]Run manually:[/dim] [bold]{' '.join(cmd)}[/bold]")
+
+    console.print()
+    if dry_run:
+        success("Dry run complete")
+    else:
+        success("ContextCore local cleanup complete")
+    if removed:
+        info(f"Removed {len(removed)} path(s)")
+    if skipped and dry_run:
+        info(f"Skipped {len(skipped)} path(s)")
+    if not remove_package:
+        console.print(f"  [dim]Optional: remove package too with:[/dim] [bold]{sys.executable} -m pip uninstall -y contextcore[/bold]")

@@ -342,6 +342,42 @@ def autostart_status() -> dict[str, Any]:
     return meta
 
 
+def uninstall_autostart() -> tuple[bool, str]:
+    system = platform.system()
+    try:
+        if system == "Windows":
+            result = subprocess.run(
+                ["schtasks", "/Delete", "/F", "/TN", WINDOWS_TASK_NAME],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if result.returncode not in (0, 1):
+                return False, result.stderr.strip() or result.stdout.strip() or "failed to delete scheduled task"
+
+            script_path = CONTEXTCORE_HOME / "start_contextcore.ps1"
+            script_path.unlink(missing_ok=True)
+            AUTOSTART_META_PATH.unlink(missing_ok=True)
+            return True, "autostart removed"
+
+        if system == "Darwin":
+            if MACOS_LAUNCH_AGENT_PATH.exists():
+                subprocess.run(
+                    ["launchctl", "unload", str(MACOS_LAUNCH_AGENT_PATH)],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                MACOS_LAUNCH_AGENT_PATH.unlink(missing_ok=True)
+            AUTOSTART_META_PATH.unlink(missing_ok=True)
+            return True, "autostart removed"
+
+        AUTOSTART_META_PATH.unlink(missing_ok=True)
+        return True, "autostart metadata removed"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def stop_pid(pid: int) -> bool:
     try:
         if platform.system() == "Windows":

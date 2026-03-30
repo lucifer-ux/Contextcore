@@ -14,14 +14,18 @@ and send only what matters to AI.
 
 ## Install
 
-**macOS / Linux**
-```bash
-curl -sL https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.sh | bash
+Install from PyPI:
+
+```powershell
+python -m pip install contextcore==0.1.0
 ```
 
-**Windows**
+Optional source install (for contributors):
+
 ```powershell
-irm https://raw.githubusercontent.com/lucifer-ux/SearchEmbedSDK/main/install.ps1 | iex
+git clone https://github.com/lucifer-ux/SearchEmbedSDK.git
+cd SearchEmbedSDK
+python -m pip install -e .
 ```
 
 Then run the setup wizard:
@@ -90,7 +94,7 @@ Run:
 contextcore --help
 ```
 
-If that fails, the venv is either not activated or the editable install did not complete.
+If that fails, the package is not installed in the Python environment your shell is using.
 
 ## Daily Commands
 
@@ -133,6 +137,24 @@ contextcore start
 contextcore stop
 contextcore restart
 contextcore server status
+```
+
+### Remove ContextCore from this machine
+
+```powershell
+contextcore uninstall
+```
+
+Preview without deleting anything:
+
+```powershell
+contextcore uninstall --dry-run
+```
+
+Fully remove local data and also uninstall the pip package:
+
+```powershell
+contextcore uninstall --yes --remove-package
 ```
 
 ### Diagnose setup problems
@@ -356,13 +378,12 @@ If the backend is healthy, you should get a successful response.
 
 Cause:
 - venv not activated
-- editable install not run
+- package not installed in the active Python environment
 
 Fix:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-pip install -e .
+python -m pip install contextcore==0.1.0
 ```
 
 ### 2. `contextcore init` fails on import errors
@@ -375,6 +396,12 @@ Fix:
 
 ```powershell
 python -m pip install --upgrade pip
+python -m pip install --force-reinstall contextcore==0.1.0
+```
+
+If you are developing from source instead of PyPI:
+
+```powershell
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -578,3 +605,60 @@ If something still fails, capture:
 - the Python path used by Claude in your MCP config
 
 That is usually enough to isolate the issue quickly.
+
+## Publish to PyPI
+
+ContextCore is now configured for packaging with `pyproject.toml` + `twine`.
+
+### One-time setup
+
+```powershell
+python -m pip install --upgrade pip build twine wheel
+```
+
+Create your local PyPI credentials file:
+
+1. Copy [`./.pypirc.example`](./.pypirc.example) to `%USERPROFILE%\.pypirc`
+2. Replace token placeholders with real tokens
+3. Keep `%USERPROFILE%\.pypirc` private (never commit)
+
+### Build and publish
+
+```powershell
+# Build artifacts into ./dist
+python -m build --no-isolation
+
+# Validate metadata and long description
+python -m twine check dist/*
+
+# Upload to PyPI
+python -m twine upload dist/*
+```
+
+Or use the helper script:
+
+```powershell
+# Upload to real PyPI
+.\scripts\publish_pypi.ps1
+
+# Upload to TestPyPI
+.\scripts\publish_pypi.ps1 -Repository testpypi
+```
+
+### Token setup (recommended)
+
+In `%USERPROFILE%\.pypirc` use:
+
+```ini
+[pypi]
+username = __token__
+password = pypi-<your-real-token>
+```
+
+Alternative (without `.pypirc`):
+
+```powershell
+$env:TWINE_USERNAME = "__token__"
+$env:TWINE_PASSWORD = "pypi-<your-real-token>"
+python -m twine upload dist/*
+```

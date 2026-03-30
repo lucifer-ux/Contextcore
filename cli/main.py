@@ -1,6 +1,6 @@
-# cli/main.py
+﻿# cli/main.py
 #
-# contextcore — the main CLI entrypoint.
+# contextcore â€” the main CLI entrypoint.
 # All 8 commands are registered here and dispatched to their modules.
 #
 # Install as a command:
@@ -15,14 +15,14 @@ from cli.constants import DEFAULT_PORT
 
 app = typer.Typer(
     name="contextcore",
-    help="ContextCore — unified local search for Claude and other AI tools.",
+    help="ContextCore â€” unified local search for Claude and other AI tools.",
     add_completion=False,
     rich_markup_mode="rich",
     no_args_is_help=True,
 )
 
 
-# ── contextcore init ───────────────────────────────────────────────────────────
+# â”€â”€ contextcore init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def init():
@@ -36,7 +36,7 @@ def init():
     run_init()
 
 
-# ── contextcore status ─────────────────────────────────────────────────────────
+# â”€â”€ contextcore status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def status(
@@ -51,7 +51,7 @@ def status(
     run_status(port=port)
 
 
-# ── contextcore index ──────────────────────────────────────────────────────────
+# â”€â”€ contextcore index â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command(name="index")
 def index_cmd(
@@ -72,7 +72,7 @@ def index_cmd(
     run_index(target=target)
 
 
-# ── contextcore search ──────────────────────────────────────────────────────────
+# â”€â”€ contextcore search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def search():
@@ -100,7 +100,7 @@ def add_folder_cmd(
     run_add_folder(path=path, index_now=not no_index)
 
 
-# ── contextcore install ────────────────────────────────────────────────────────
+# â”€â”€ contextcore install â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def install(
@@ -124,7 +124,7 @@ def install(
     run_install(model=model)
 
 
-# ── contextcore register ───────────────────────────────────────────────────────
+# â”€â”€ contextcore register â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def register(
@@ -198,7 +198,7 @@ def update(
     run_update(restart_server=restart)
 
 
-# ── contextcore doctor ─────────────────────────────────────────────────────────
+# â”€â”€ contextcore doctor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def doctor():
@@ -213,7 +213,7 @@ def doctor():
     run_doctor()
 
 
-# ── contextcore serve ──────────────────────────────────────────────────────────
+# â”€â”€ contextcore serve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def serve(
@@ -283,7 +283,65 @@ def restart_cmd(
     run_server(action="restart", port=port)
 
 
-# ── Entrypoint ─────────────────────────────────────────────────────────────────
+# â”€â”€ Entrypoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+@app.command(name="uninstall")
+def uninstall_cmd(
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be removed."),
+    remove_package: bool = typer.Option(
+        False,
+        "--remove-package",
+        help="Also run pip uninstall for contextcore after cleanup.",
+    ),
+    purge_model_cache: bool = typer.Option(
+        False,
+        "--purge-model-cache",
+        help="Also remove local Hugging Face/Torch model cache folders.",
+    ),
+):
+    """
+    [bold]Remove ContextCore from this machine.[/bold]
+
+    Stops server + autostart, unregisters MCP entries, and deletes local
+    ContextCore config/index state.
+    """
+    from cli.commands.helpers import run_uninstall
+
+    run_uninstall(
+        yes=yes,
+        dry_run=dry_run,
+        remove_package=remove_package,
+        purge_model_cache=purge_model_cache,
+    )
+
+
+@app.command(name="remove")
+def remove_cmd(
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be removed."),
+    remove_package: bool = typer.Option(
+        False,
+        "--remove-package",
+        help="Also run pip uninstall for contextcore after cleanup.",
+    ),
+    purge_model_cache: bool = typer.Option(
+        False,
+        "--purge-model-cache",
+        help="Also remove local Hugging Face/Torch model cache folders.",
+    ),
+):
+    """
+    [bold]Alias for contextcore uninstall.[/bold]
+    """
+    from cli.commands.helpers import run_uninstall
+
+    run_uninstall(
+        yes=yes,
+        dry_run=dry_run,
+        remove_package=remove_package,
+        purge_model_cache=purge_model_cache,
+    )
 
 def main() -> None:
     app()
@@ -291,3 +349,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

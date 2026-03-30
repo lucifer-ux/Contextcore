@@ -1,26 +1,7 @@
 """
-setup.py — compatibility shim for older pip versions.
-The real configuration is in pyproject.toml.
+Legacy shim for older tooling.
+All package metadata is defined in pyproject.toml.
 """
-from setuptools import setup, find_packages
+from setuptools import setup
 
-setup(
-    name="contextcore",
-    version="0.1.0",
-    packages=find_packages(include=["cli*", "core*"]),
-    entry_points={
-        "console_scripts": [
-            "contextcore=cli.main:main",
-        ],
-    },
-    install_requires=[
-        "typer",
-        "rich",
-        "questionary",
-        "fastapi",
-        "uvicorn",
-        "requests",
-        "annoy",
-    ],
-    python_requires=">=3.10",
-)
+setup()

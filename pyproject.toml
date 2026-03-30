@@ -6,7 +6,21 @@ build-backend = "setuptools.build_meta"
 name = "contextcore"
 version = "0.1.0"
 description = "Unified local search and indexing for Claude and other AI tools"
+readme = "README.md"
+license = "AGPL-3.0-only"
 requires-python = ">=3.10"
+keywords = ["mcp", "contextcore", "search", "indexing", "claude", "retrieval", "rag"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 dependencies = [
     "fastapi",
@@ -35,14 +49,44 @@ all    = ["torch", "torchvision", "transformers", "faster-whisper"]
 dev = [
     "pytest",
     "pytest-timeout",
+    "build",
+    "twine",
 ]
 
 [project.scripts]
 contextcore = "cli.main:main"
 
+[project.urls]
+Homepage = "https://github.com/lucifer-ux/SearchEmbedSDK"
+Repository = "https://github.com/lucifer-ux/SearchEmbedSDK"
+Issues = "https://github.com/lucifer-ux/SearchEmbedSDK/issues"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = [
+    "auth_manager",
+    "config",
+    "detect_paths",
+    "mcp_registration",
+    "mcp_server",
+    "rclone_service",
+    "register_mcp",
+    "run_index_pipeline",
+    "unimain",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cli*", "core*"]
+include = [
+    "activity*",
+    "audio_search_implementation_v2*",
+    "cli*",
+    "core*",
+    "image_search_implementation_v2*",
+    "index_controller*",
+    "text_search_implementation_v2*",
+    "video_search_implementation_v2*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
