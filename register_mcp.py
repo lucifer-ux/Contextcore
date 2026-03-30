@@ -459,12 +459,32 @@ FORMAT_WRITERS = {
 }
 
 
+def _config_candidates(tool_def: dict[str, Any]) -> list[pathlib.Path]:
+    return [pathlib.Path(p).expanduser() for p in tool_def.get("config_paths", [])]
+
+
 def find_config_path(tool_def: dict[str, Any]) -> Optional[pathlib.Path]:
-    candidates = [pathlib.Path(p).expanduser() for p in tool_def.get("config_paths", [])]
+    candidates = _config_candidates(tool_def)
     for c in candidates:
         if c.exists():
             return c
     return candidates[0] if candidates else None
+
+
+def find_config_paths(tool_def: dict[str, Any]) -> list[pathlib.Path]:
+    """
+    Return every config path that should be updated for a tool.
+
+    If one or more paths already exist, update all existing paths so users with
+    mirrored/sandboxed configs (for example Windows Store app sandboxes) do not
+    end up with stale MCP command paths.
+    If none exist yet, return the first candidate to create it.
+    """
+    candidates = _config_candidates(tool_def)
+    existing = [c for c in candidates if c.exists()]
+    if existing:
+        return existing
+    return candidates[:1]
 
 
 def detect_installed_tools(tools: dict[str, dict[str, Any]]) -> list[str]:
@@ -478,96 +498,109 @@ def detect_installed_tools(tools: dict[str, dict[str, Any]]) -> list[str]:
 
 
 def register_tool(tool_name: str, tool_def: dict[str, Any], python_path: str, mcp_script: str, dry_run: bool = False) -> bool:
-    config_path = find_config_path(tool_def)
-    if config_path is None:
+    config_paths = find_config_paths(tool_def)
+    if not config_paths:
         print(f"  [X] No config path for {tool_name}")
         return False
     writer = FORMAT_WRITERS.get(tool_def.get("config_format"))
     if writer is None:
         print(f"  [X] Unknown config format for {tool_name}")
         return False
-    try:
-        writer(config_path, python_path, mcp_script, dry_run=dry_run)
-        if not dry_run:
-            print(f"  [OK] {config_path}")
-            note = tool_def.get("notes")
-            if note:
-                print(f"      {note}")
-        return True
-    except PermissionError:
-        print(f"  [X] Permission denied: {config_path}")
-        return False
-    except Exception as exc:
-        print(f"  [X] Failed for {tool_name}: {exc}")
-        return False
+    wrote_any = False
+    for config_path in config_paths:
+        try:
+            writer(config_path, python_path, mcp_script, dry_run=dry_run)
+            if not dry_run:
+                print(f"  [OK] {config_path}")
+            wrote_any = True
+        except PermissionError:
+            print(f"  [X] Permission denied: {config_path}")
+        except Exception as exc:
+            print(f"  [X] Failed for {tool_name} at {config_path}: {exc}")
+
+    if wrote_any and not dry_run:
+        note = tool_def.get("notes")
+        if note:
+            print(f"      {note}")
+    return wrote_any
 
 
 def unregister_tool(tool_name: str, tool_def: dict[str, Any], dry_run: bool = False) -> bool:
-    config_path = find_config_path(tool_def)
-    if config_path is None or not config_path.exists():
+    config_paths = [p for p in find_config_paths(tool_def) if p.exists()]
+    if not config_paths:
         return False
+    removed_any = False
     fmt = tool_def.get("config_format")
-    if fmt in ("mcpServers_stdio", "opencode_mcp"):
-        data = _read_json_safe(config_path)
-        key = "mcp" if fmt == "opencode_mcp" else "mcpServers"
-        root = data.get(key)
-        if isinstance(root, dict) and SERVER_NAME in root:
-            if dry_run:
-                print(f"  [dry-run] Would remove {SERVER_NAME} from {config_path}")
-                return True
-            _backup_file(config_path)
-            del root[SERVER_NAME]
-            _write_json_atomic(config_path, data)
-            print(f"  [OK] Removed from {config_path}")
-            return True
-    elif fmt == "continue_mcp":
-        data = _read_json_safe(config_path)
-        servers = data.get("mcpServers")
-        if isinstance(servers, list):
-            before = len(servers)
-            servers = [s for s in servers if not (isinstance(s, dict) and s.get("name") == SERVER_NAME)]
-            if len(servers) < before:
+    for config_path in config_paths:
+        if fmt in ("mcpServers_stdio", "opencode_mcp"):
+            data = _read_json_safe(config_path)
+            key = "mcp" if fmt == "opencode_mcp" else "mcpServers"
+            root = data.get(key)
+            if isinstance(root, dict) and SERVER_NAME in root:
                 if dry_run:
                     print(f"  [dry-run] Would remove {SERVER_NAME} from {config_path}")
-                    return True
-                data["mcpServers"] = servers
+                    removed_any = True
+                    continue
                 _backup_file(config_path)
+                del root[SERVER_NAME]
                 _write_json_atomic(config_path, data)
                 print(f"  [OK] Removed from {config_path}")
-                return True
-    elif fmt == "zed_context_server":
-        data = _read_json_safe(config_path)
-        ctx = data.get("context_servers")
-        if isinstance(ctx, dict) and SERVER_NAME in ctx:
-            if dry_run:
-                print(f"  [dry-run] Would remove {SERVER_NAME} from {config_path}")
-                return True
-            _backup_file(config_path)
-            del ctx[SERVER_NAME]
-            _write_json_atomic(config_path, data)
-            print(f"  [OK] Removed from {config_path}")
-            return True
-    return False
+                removed_any = True
+        elif fmt == "continue_mcp":
+            data = _read_json_safe(config_path)
+            servers = data.get("mcpServers")
+            if isinstance(servers, list):
+                before = len(servers)
+                servers = [s for s in servers if not (isinstance(s, dict) and s.get("name") == SERVER_NAME)]
+                if len(servers) < before:
+                    if dry_run:
+                        print(f"  [dry-run] Would remove {SERVER_NAME} from {config_path}")
+                        removed_any = True
+                        continue
+                    data["mcpServers"] = servers
+                    _backup_file(config_path)
+                    _write_json_atomic(config_path, data)
+                    print(f"  [OK] Removed from {config_path}")
+                    removed_any = True
+        elif fmt == "zed_context_server":
+            data = _read_json_safe(config_path)
+            ctx = data.get("context_servers")
+            if isinstance(ctx, dict) and SERVER_NAME in ctx:
+                if dry_run:
+                    print(f"  [dry-run] Would remove {SERVER_NAME} from {config_path}")
+                    removed_any = True
+                    continue
+                _backup_file(config_path)
+                del ctx[SERVER_NAME]
+                _write_json_atomic(config_path, data)
+                print(f"  [OK] Removed from {config_path}")
+                removed_any = True
+    return removed_any
 
 
 def verify_registration(tool_name: str, tool_def: dict[str, Any]) -> bool:
-    config_path = find_config_path(tool_def)
-    if config_path is None or not config_path.exists():
+    config_paths = [p for p in find_config_paths(tool_def) if p.exists()]
+    if not config_paths:
         return False
     fmt = tool_def.get("config_format")
-    data = _read_json_safe(config_path)
-    if fmt == "opencode_mcp":
-        root = data.get("mcp")
-        return isinstance(root, dict) and SERVER_NAME in root
-    if fmt == "mcpServers_stdio":
-        root = data.get("mcpServers")
-        return isinstance(root, dict) and SERVER_NAME in root
-    if fmt == "continue_mcp":
-        servers = data.get("mcpServers")
-        return isinstance(servers, list) and any(isinstance(s, dict) and s.get("name") == SERVER_NAME for s in servers)
-    if fmt == "zed_context_server":
-        root = data.get("context_servers")
-        return isinstance(root, dict) and SERVER_NAME in root
+    for config_path in config_paths:
+        data = _read_json_safe(config_path)
+        if fmt == "opencode_mcp":
+            root = data.get("mcp")
+            if isinstance(root, dict) and SERVER_NAME in root:
+                return True
+        elif fmt == "mcpServers_stdio":
+            root = data.get("mcpServers")
+            if isinstance(root, dict) and SERVER_NAME in root:
+                return True
+        elif fmt == "continue_mcp":
+            servers = data.get("mcpServers")
+            if isinstance(servers, list) and any(isinstance(s, dict) and s.get("name") == SERVER_NAME for s in servers):
+                return True
+        elif fmt == "zed_context_server":
+            root = data.get("context_servers")
+            if isinstance(root, dict) and SERVER_NAME in root:
+                return True
     return False
 
 
