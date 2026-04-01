@@ -63,7 +63,7 @@ ContextCore gives you:
   - images
   - audio transcripts
   - video embeddings and video context
-  - codebase context (structure, symbols, dependencies, file-level detail)
+  - codebase context  (structure, symbols, dependencies, file-level detail)
 
 ## Codebase Context for Claude/OpenCode
 
